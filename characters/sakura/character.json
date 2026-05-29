@@ -4,13 +4,26 @@
   "initial_message": "……起動した。用事があるなら、呼んで。",
   "card": "card.md",
   "portrait": {
-    "default": "portraits/ST31A_A020_结果.png",
+    "default": "portraits/idle_soft_smile_A020.png",
     "expressions": {
-      "中性": "portraits/ST31A_A020_结果.png",
-      "开心": "portraits/ST31A_A110_结果.png",
-      "温柔": "portraits/ST31A_A120_结果.png",
-      "甜蜜": "portraits/ST31A_A150_结果.png",
-      "害羞": "portraits/ST31A_A041_结果.png"
+      "中性": "portraits/idle_soft_smile_A020.png",
+      "冷静": "portraits/idle_neutral_A010.png",
+      "困惑": "portraits/react_confused_o_A040.png",
+      "满意": "portraits/blink_smile_A050.png",
+      "害羞": "portraits/shy_blush_A061.png",
+      "惊讶": "portraits/react_surprised_A110.png",
+      "严肃": "portraits/talk_scold_A120.png",
+      "低落": "portraits/sad_downcast_A130.png",
+      "无语": "portraits/sleepy_blank_A140.png",
+      "无奈": "portraits/sigh_eyes_closed_A160.png",
+      "俏皮": "portraits/wink_playful_A180.png",
+      "不满": "portraits/pout_skeptical_A230.png",
+      "自信": "portraits/confident_neutral_B010.png",
+      "提醒": "portraits/confident_callout_B120.png",
+      "调侃": "portraits/confident_teasing_B170.png",
+      "招呼": "portraits/gesture_wave_neutral_I010.png",
+      "引导": "portraits/gesture_invite_smile_I170.png",
+      "告别": "portraits/gesture_goodbye_smile_I180.png"
     }
   },
   "voice": {
@@ -20,6 +33,25 @@
     "tone_refs": "voice/refs/ref.txt"
   },
   "reply": {
-    "tones": ["开心", "中性", "温柔", "甜蜜", "害羞"]
+    "tones": [
+      "中性",
+      "冷静",
+      "困惑",
+      "满意",
+      "害羞",
+      "惊讶",
+      "严肃",
+      "低落",
+      "无语",
+      "无奈",
+      "俏皮",
+      "不满",
+      "自信",
+      "提醒",
+      "调侃",
+      "招呼",
+      "引导",
+      "告别"
+    ]
   }
 }

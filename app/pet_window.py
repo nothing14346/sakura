@@ -43,7 +43,7 @@ from app.tts import (
 
 
 SPEECH_TYPING_INTERVAL_MS = 35
-REPLY_SEGMENT_PAUSE_MS = 500
+REPLY_SEGMENT_PAUSE_MS = 100
 SUBTITLE_LANGUAGE_KEY = "SUBTITLE_LANGUAGE"
 SUBTITLE_LANGUAGE_JA = "ja"
 SUBTITLE_LANGUAGE_ZH = "zh"
@@ -72,6 +72,7 @@ class PetWindow(QWidget):
         self.subtitle_language = self._load_subtitle_language()
         self.history_window: HistoryWindow | None = None
         self.messages: list[dict[str, str]] = []
+        self.portrait_pixmap_cache: dict[Path, QPixmap] = {}
         self.thread: QThread | None = None
         self.worker: ChatWorker | None = None
         self.drag_offset: QPoint | None = None
@@ -256,15 +257,26 @@ class PetWindow(QWidget):
             return True
         return False
 
-    def _load_portrait(self) -> QPixmap:
-        pixmap = QPixmap(str(self.portrait_path))
+    def _load_portrait(self, portrait_path: Path | None = None) -> QPixmap:
+        target_path = portrait_path or self.portrait_path
+        cached = self.portrait_pixmap_cache.get(target_path)
+        if cached is not None:
+            return cached
+
+        pixmap = QPixmap(str(target_path))
         if pixmap.isNull():
             QMessageBox.critical(
                 self,
                 "立绘加载失败",
-                f"无法加载立绘：{self.portrait_path}",
+                f"无法加载立绘：{target_path}",
             )
+        self.portrait_pixmap_cache[target_path] = pixmap
         return pixmap
+
+    def _preload_portrait_for_tone(self, tone: str | None) -> None:
+        next_portrait_path = self.character_profile.portrait_for_tone(tone)
+        if next_portrait_path not in self.portrait_pixmap_cache:
+            self._load_portrait(next_portrait_path)
 
     def _apply_portrait_for_tone(self, tone: str | None) -> None:
         next_portrait_path = self.character_profile.portrait_for_tone(tone)
@@ -622,7 +634,7 @@ class PetWindow(QWidget):
         self.current_segment_speech_done = False
         self.current_segment_tts_done = False
         self.reply_advance_scheduled = False
-        self._apply_portrait_for_tone(segment.tone)
+        self._preload_portrait_for_tone(segment.tone)
         self.tts_provider.speak(
             segment.text,
             segment.tone,
@@ -637,6 +649,7 @@ class PetWindow(QWidget):
             or self.current_segment is None
         ):
             return
+        self._apply_portrait_for_tone(self.current_segment.tone)
         self.set_speech(self.current_segment.display_text(self.subtitle_language))
 
     def _mark_segment_speech_done(self, sequence_id: int) -> None:

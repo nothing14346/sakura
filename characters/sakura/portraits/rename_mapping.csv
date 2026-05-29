@@ -1,0 +1,21 @@
+﻿original_filename,new_filename,pose_group,expression_action,desktop_pet_use,notes
+ST31A_A010_#U7ed3#U679c.png,idle_neutral_A010.png,A-基础站姿,冷静/无表情，嘴角平直,默认待机、低频呼吸循环,最稳的基础态，适合主 idle
+ST31A_A020_#U7ed3#U679c.png,idle_soft_smile_A020.png,A-基础站姿,轻微微笑，眼神柔和,轻松待机、被摸头后恢复,比 A010 亲和，可做二级 idle
+ST31A_A040_#U7ed3#U679c.png,react_confused_o_A040.png,A-基础站姿,小圆嘴、略困惑,问号、等待输入、加载中,疑惑但不夸张
+ST31A_A050_#U7ed3#U679c.png,blink_smile_A050.png,A-基础站姿,闭眼微笑,眨眼帧、满意、休息,适合插入 idle 动画
+ST31A_A061_#U7ed3#U679c.png,shy_blush_A061.png,A-基础站姿,脸红、低调微笑,被夸、好感上升、害羞反馈,与普通微笑区分度高
+ST31A_A110_#U7ed3#U679c.png,react_surprised_A110.png,A-基础站姿,睁大眼、小嘴，惊讶,突然提醒、错误提示、被点击惊到,惊讶感清晰
+ST31A_A120_#U7ed3#U679c.png,talk_scold_A120.png,A-基础站姿,张嘴、眉眼更强势,吐槽、警告、严肃对话,口型明显，适合作说话帧
+ST31A_A130_#U7ed3#U679c.png,sad_downcast_A130.png,A-基础站姿,眉眼下压、委屈/低落,失败、没电、长时间无互动,低落但不崩坏
+ST31A_A140_#U7ed3#U679c.png,sleepy_blank_A140.png,A-基础站姿,半睁眼、无语,吐槽、不满、无语,适合用户说了奇怪的话
+ST31A_A160_#U7ed3#U679c.png,sigh_eyes_closed_A160.png,A-基础站姿,闭眼、平嘴，像叹气/沉思,思考、加载、无奈,可与 A140 连成困倦/叹气链
+ST31A_A180_#U7ed3#U679c.png,wink_playful_A180.png,A-基础站姿,单眼闭合、俏皮笑,完成任务、彩蛋、好感反馈,很适合作奖励反馈
+ST31A_A230_#U7ed3#U679c.png,pout_skeptical_A230.png,A-基础站姿,小嘴、怀疑/不满,被连续戳、拒绝操作,比愤怒更日常
+ST31A_B010_#U7ed3#U679c.png,confident_neutral_B010.png,B-叉腰/支撑站姿,中性但更有主见,切换到自信待机、菜单展示,B 组姿态区分明显
+ST31A_B060_#U7ed3#U679c.png,confident_shy_smile_B060.png,B-叉腰/支撑站姿,微笑+脸红，自信中带害羞,积极反馈、亲密互动,与 A061 相似但姿态更主动
+ST31A_B120_#U7ed3#U679c.png,confident_callout_B120.png,B-叉腰/支撑站姿,张嘴说话、态度强势,提醒用户、倒计时、催促,适合通知类说话
+ST31A_B170_#U7ed3#U679c.png,confident_teasing_B170.png,B-叉腰/支撑站姿,眯眼/小笑，略得意,吐槽、调侃、胜利,性格表现很强
+ST31A_I010_#U7ed3#U679c.png,gesture_wave_neutral_I010.png,I-抬手手势,抬手，表情中性,打招呼、召唤、引导点击,手势态最基础
+ST31A_I120_#U7ed3#U679c.png,gesture_callout_I120.png,I-抬手手势,抬手+张嘴，像喊话,强提醒、弹窗通知、教学提示,动作和口型同时明显
+ST31A_I170_#U7ed3#U679c.png,gesture_invite_smile_I170.png,I-抬手手势,抬手+微笑/得意,欢迎、确认、引导用户操作,正向交互感强
+ST31A_I180_#U7ed3#U679c.png,gesture_goodbye_smile_I180.png,I-抬手手势,抬手+闭眼笑,再见、感谢、完成收尾,适合结束动画
