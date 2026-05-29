@@ -14,3 +14,6 @@ env/
 
 *.log
 data/chat_history.jsonl
+data/chat_history/sakura.jsonl
+task.md
+data/chat_history/sakura.jsonl
