@@ -27,8 +27,8 @@
     }
   },
   "voice": {
-    "gpt_model": "voice/models/Sakura-e20.ckpt",
-    "sovits_model": "voice/models/Sakura_e8_s5528.pth",
+    "gpt_model": "voice/models/Sakura-e15.ckpt",
+    "sovits_model": "voice/models/Sakura_e8_s7176.pth",
     "text_lang": "ja",
     "tone_refs": "voice/refs/ref.txt"
   },
