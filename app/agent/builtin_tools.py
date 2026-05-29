@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.agent.browser_tools import BrowserToolExecutor, BrowserTools
 from app.agent.desktop_tools import NotesStore, open_local_folder, open_url
 from app.agent.memory import MemoryStore
 from app.agent.reminders import ReminderStore
@@ -16,11 +17,13 @@ def create_builtin_tool_registry(
     base_dir: Path,
     memory: MemoryStore | None = None,
     reminders: ReminderStore | None = None,
+    browser_executor: BrowserToolExecutor | None = None,
 ) -> ToolRegistry:
     store = TodoStore(base_dir / "data" / "tasks.json")
     notes = NotesStore(base_dir / "data" / "notes")
     memory = memory or MemoryStore(base_dir / "data" / "memory.json")
     reminders = reminders or ReminderStore(base_dir / "data" / "reminders.json")
+    browser = BrowserTools(browser_executor)
     return ToolRegistry(
         [
             Tool(
@@ -142,6 +145,75 @@ def create_builtin_tool_registry(
                 },
                 handler=open_url,
                 requires_confirmation=True,
+            ),
+            Tool(
+                name="browser_open_url",
+                description="在 Sakura 托管的受控浏览器窗口中打开 http 或 https 网页。需要用户确认后才能执行。",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "要打开的 http/https URL。"},
+                    },
+                    "required": ["url"],
+                },
+                handler=browser.open_url,
+                requires_confirmation=True,
+            ),
+            Tool(
+                name="browser_get_content",
+                description="读取 Sakura 受控浏览器当前页面的 URL、标题、正文文本和主要链接。需要网页内容时优先使用该工具。",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "max_chars": {
+                            "type": "number",
+                            "description": "正文最大返回字符数，默认 6000，最高 20000。",
+                        },
+                    },
+                },
+                handler=browser.get_content,
+            ),
+            Tool(
+                name="browser_scroll",
+                description="滚动 Sakura 受控浏览器当前页面。该工具会改变网页状态，需要用户确认后才能执行。",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "direction": {
+                            "type": "string",
+                            "description": "滚动方向，只能是 up 或 down。",
+                        },
+                        "amount": {
+                            "type": "number",
+                            "description": "滚动像素数，默认 800，最高 5000。",
+                        },
+                    },
+                    "required": ["direction"],
+                },
+                handler=browser.scroll,
+                requires_confirmation=True,
+            ),
+            Tool(
+                name="browser_click",
+                description="在 Sakura 受控浏览器当前页面点击第一个匹配 CSS selector 的元素。该工具会改变网页状态，需要用户确认后才能执行。",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "selector": {
+                            "type": "string",
+                            "description": "CSS selector，例如 button.submit 或 a[href*='login']。",
+                        },
+                    },
+                    "required": ["selector"],
+                },
+                handler=browser.click,
+                requires_confirmation=True,
+            ),
+            Tool(
+                name="browser_get_state",
+                description="获取 Sakura 受控浏览器当前页面 URL、标题、加载状态、滚动位置和页面尺寸。",
+                parameters={},
+                handler=browser.get_state,
             ),
             Tool(
                 name="open_local_folder",

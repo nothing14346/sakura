@@ -776,11 +776,11 @@ def _load_tone_references(ref_path: Path | None, base_dir: Path) -> dict[str, li
         if not line or line.startswith("#"):
             continue
 
-        parts = line.split("|", 4)
-        if len(parts) != 5:
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) != 4:
             continue
 
-        audio_text, _source, lang, prompt_text, tone = [part.strip() for part in parts]
+        audio_text, lang, prompt_text, tone = parts
         audio_path = _resolve_path(audio_text, base_dir)
         copied_path = ref_path.parent / "tone_refs" / audio_path.name
         if copied_path.exists():

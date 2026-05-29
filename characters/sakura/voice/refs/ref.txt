@@ -1,5 +1,12 @@
-D:\Project\sakura\vo\VO01_2707.ogg|vo|JA|私も、あなたに、してたんだよ。一目惚れ | 开心
-D:\Project\sakura\vo\VO01_2785.ogg|vo|JA|でも私、初めて君に会った時、 思ったよ | 中性
-D:\Project\sakura\vo\VO01_3986.ogg|vo|JA|きっと大変なこと、沢山あると思うけど | 温柔
-D:\Project\sakura\vo\VO01_3987.ogg|vo|JA|いっしょに。頑張っていこうね。 ……いっしょ、だからね？ | 甜蜜
-D:\Project\sakura\vo\VO01_3976.ogg|vo|JA|……み、皆がいるとこで、 あんまり言わないで。そういうこと | 害羞
+voice/refs/tone_refs/00_中性_VO01_2785.ogg|JA|でも私、初めて君に会った時、 思ったよ|中性
+voice/refs/tone_refs/10_身体关心_VO01_0207.wav|JA|うん。体調に問題あったら、すぐ言ってね|提醒
+voice/refs/tone_refs/11_温柔询问_VO01_0612.wav|JA|……熱、まだある？ 大丈夫？|低落
+voice/refs/tone_refs/13_安全提醒_VO01_0460.wav|JA|何か問題があったら、すぐ呼ぶこと。いいね|严肃
+voice/refs/tone_refs/19_拜托请求_VO01_1215.wav|JA|お願いね。私は皆の分の 生徒会の仕事を片付けておくから|请求
+voice/refs/tone_refs/21_疑惑困扰_VO01_0056.ogg|JA|これ私、どういう反応すればいいの……？|困惑
+voice/refs/tone_refs/24_好奇发现_VO01_2659.wav|JA|え、すごい。音、聞こえるの？|惊讶
+voice/refs/tone_refs/25_调皮玩笑_VO01_2181.wav|JA|ごめんね。うそだった。ふふ|俏皮
+voice/refs/tone_refs/30_安心陪伴_VO01_0865.wav|JA|その時は私、できることするよ|自信
+voice/refs/tone_refs/31_晚安满足_VO01_0616.wav|JA|……おやすみ。今日は楽しかった|晚安
+voice/refs/tone_refs/VO01_3976.ogg|JA|……み、皆がいるとこで、 あんまり言わないで。そういうこと | 害羞
+voice/refs/tone_refs/VO01_3520.ogg|JA|お外で言ったら、女の子にモテちゃう。 私と二人きり以外の時は、言わないで|吃醋

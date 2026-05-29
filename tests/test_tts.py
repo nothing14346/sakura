@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+from pathlib import Path
 
 if importlib.util.find_spec("PySide6") is None:
     pyside_module = types.ModuleType("PySide6")
@@ -67,7 +68,7 @@ if importlib.util.find_spec("PySide6") is None:
     sys.modules["PySide6.QtCore"] = qtcore_module
     sys.modules["PySide6.QtMultimedia"] = qtmultimedia_module
 
-from app.tts import _resolve_request_text_lang
+from app.tts import _load_tone_references, _resolve_request_text_lang
 
 
 def test_tts_mixed_japanese_and_english_uses_auto_lang() -> None:
@@ -92,3 +93,15 @@ def test_tts_yue_mixed_english_uses_auto_yue() -> None:
     text = "Steam 打开咗。"
 
     assert _resolve_request_text_lang(text, "all_yue") == "auto_yue"
+
+
+def test_tone_references_load_four_part_rows_only() -> None:
+    ref_path = Path("characters/sakura/voice/refs/ref.txt")
+    rows = [line for line in ref_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    references = _load_tone_references(ref_path, Path("characters/sakura"))
+
+    assert all(len(row.split("|")) == 4 for row in rows)
+    assert references
+    assert all("|" not in reference.ref_text for items in references.values() for reference in items)
+    assert all(reference.ref_audio_path.exists() for items in references.values() for reference in items)

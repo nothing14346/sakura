@@ -132,10 +132,10 @@ class AgentRuntime:
                 [
                     *messages,
                     {"role": "assistant", "content": first_content},
-                    {
-                        "role": "user",
-                        "content": _format_tool_results_for_model(execution_results),
-                    },
+                    _build_tool_results_message(
+                        execution_results,
+                        include_images=self.model_vision_enabled,
+                    ),
                 ],
                 self.reply_tones,
             )
@@ -147,7 +147,7 @@ class AgentRuntime:
             actions=[
                 AgentAction(
                     type="tool_call",
-                    payload=result.to_dict(),
+                    payload=_redact_tool_result_for_model(result),
                 )
                 for result in execution_results
             ],
@@ -160,10 +160,10 @@ class AgentRuntime:
             reply = self.api_client.chat(
                 self._build_final_reply_prompt(),
                 [
-                    {
-                        "role": "user",
-                        "content": _format_tool_results_for_model([result]),
-                    }
+                    _build_tool_results_message(
+                        [result],
+                        include_images=self.model_vision_enabled,
+                    )
                 ],
                 self.reply_tones,
             )
@@ -175,7 +175,7 @@ class AgentRuntime:
             actions=[
                 AgentAction(
                     type="tool_call",
-                    payload=result.to_dict(),
+                    payload=_redact_tool_result_for_model(result),
                 )
             ],
         )
@@ -285,6 +285,8 @@ class AgentRuntime:
 - 如果工具可以帮助完成用户请求，优先用 tool_calls 表达要执行的动作。
 - 不要臆造工具名；只能使用上面列出的工具。
 - requires_confirmation 为 true 的工具只会在用户确认后执行；你仍然可以发起 tool_calls，但必须说明原因。
+- 需要读取网页内容时，优先使用 browser_get_content；需要打开网页时使用 browser_open_url。
+- 需要网页交互时，只能基于当前页面真实内容选择 browser_scroll 或 browser_click，不要臆造 selector 或页面内容。
 - observe_screen 只在确实需要当前屏幕内容时调用；如果文字信息已经足够回答，不要截图。
 - 用户说“几分钟后/几秒后/一会儿后”等相对提醒时，add_reminder 必须使用 delay_minutes 或 delay_seconds，不要自己换算 trigger_at。
 - 只有用户给出明确日期或钟点时，add_reminder 才使用 trigger_at。
@@ -371,15 +373,63 @@ def _parse_agent_reply(agent_data: dict[str, Any], fallback_content: str) -> Cha
     return parse_chat_reply(fallback_content)
 
 
+def _build_tool_results_message(
+    results: list[ToolExecutionResult],
+    include_images: bool = False,
+) -> ChatMessage:
+    text = _format_tool_results_for_model(results)
+    images = _extract_tool_result_images(results) if include_images else []
+    if not images:
+        return {"role": "user", "content": text}
+
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    content.extend(
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": image_url,
+                "detail": "low",
+            },
+        }
+        for image_url in images
+    )
+    return {"role": "user", "content": content}
+
+
 def _format_tool_results_for_model(results: list[ToolExecutionResult]) -> str:
     return (
-        "工具执行结果如下，请据此给用户最终回复：\n"
+        "工具执行结果如下，请据此给用户最终回复。"
+        "如果工具结果标记已附加浏览器截图，请结合截图兜底判断页面内容，不要臆造看不到的信息：\n"
         + json.dumps(
-            [result.to_dict() for result in results],
+            [_redact_tool_result_for_model(result) for result in results],
             ensure_ascii=False,
             indent=2,
         )
     )
+
+
+def _redact_tool_result_for_model(result: ToolExecutionResult) -> dict[str, Any]:
+    data = result.to_dict()
+    content = data.get("content")
+    if not isinstance(content, dict):
+        return data
+
+    redacted = dict(content)
+    if redacted.pop("screenshot_data_url", None):
+        redacted["screenshot_attached"] = True
+    data["content"] = redacted
+    return data
+
+
+def _extract_tool_result_images(results: list[ToolExecutionResult]) -> list[str]:
+    images: list[str] = []
+    for result in results:
+        if not isinstance(result.content, dict):
+            continue
+        image_url = result.content.get("screenshot_data_url")
+        if isinstance(image_url, str) and image_url.startswith("data:image/"):
+            images.append(image_url)
+    return images[:1]
 
 
 def _build_pending_action_reply(actions: list[PendingToolAction]) -> ChatReply:
@@ -420,6 +470,14 @@ def _build_pending_action_reply(actions: list[PendingToolAction]) -> ChatReply:
 def _describe_pending_action(action: PendingToolAction) -> str:
     if action.tool_name == "open_url":
         return f"打开网页 {action.arguments.get('url', '')}"
+    if action.tool_name == "browser_open_url":
+        return f"在受控浏览器中打开网页 {action.arguments.get('url', '')}"
+    if action.tool_name == "browser_scroll":
+        direction = action.arguments.get("direction", "")
+        amount = action.arguments.get("amount", "")
+        return f"滚动受控浏览器页面 {direction} {amount}"
+    if action.tool_name == "browser_click":
+        return f"点击受控浏览器页面元素 {action.arguments.get('selector', '')}"
     if action.tool_name == "open_local_folder":
         return f"打开文件夹 {action.arguments.get('path', '')}"
     return f"执行 {action.tool_name}"
@@ -534,6 +592,21 @@ def _summarize_tool_results(results: list[ToolExecutionResult]) -> str:
                 parts.append(f"记忆「{memory.get('content', '')}」已确认。")
             elif result.tool_name == "open_url":
                 parts.append(f"网页已打开：{result.content.get('url', '')}。")
+            elif result.tool_name == "browser_open_url":
+                parts.append(f"受控浏览器已打开：{result.content.get('url', '')}。")
+            elif result.tool_name == "browser_get_content":
+                title = result.content.get("title", "")
+                text = result.content.get("text", "")
+                parts.append(f"网页内容已读取：{title}。{str(text)[:120]}")
+            elif result.tool_name == "browser_scroll":
+                parts.append(f"页面已滚动到 Y={result.content.get('scroll_y', '')}。")
+            elif result.tool_name == "browser_click":
+                parts.append(f"页面元素已点击：{result.content.get('selector', '')}。")
+            elif result.tool_name == "browser_get_state":
+                parts.append(
+                    f"当前网页：{result.content.get('title', '')}，"
+                    f"滚动位置 Y={result.content.get('scroll_y', '')}。"
+                )
             elif result.tool_name == "open_local_folder":
                 parts.append(f"文件夹已打开：{result.content.get('path', '')}。")
             elif result.tool_name == "read_note":

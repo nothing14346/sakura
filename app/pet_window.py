@@ -3,12 +3,24 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QThread, QTimer, Slot
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QParallelAnimationGroup,
+    QPoint,
+    QPropertyAnimation,
+    QRect,
+    Qt,
+    QThread,
+    QTimer,
+    Slot,
+)
 from PySide6.QtGui import QAction, QCursor, QFont, QFontDatabase, QIcon, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -30,6 +42,7 @@ from app.agent import (
     create_builtin_tool_registry,
 )
 from app.api_client import OpenAICompatibleClient
+from app.browser_controller import BrowserController, BrowserToolBridge
 from app.character_loader import (
     DEFAULT_CHARACTER_ID,
     CharacterConfigError,
@@ -42,6 +55,7 @@ from app.chat_reply import ChatReply, ChatSegment
 from app.chat_worker import ChatWorker, EventWorker
 from app.env_config import load_env_file, save_env_values
 from app.history_window import HistoryWindow
+from app.portrait_utils import should_crossfade_portrait
 from app.screen_observation import (
     append_observation_marker,
     build_screen_observation_user_message,
@@ -60,6 +74,7 @@ from app.tts import (
 
 SPEECH_TYPING_INTERVAL_MS = 35
 REPLY_SEGMENT_PAUSE_MS = 100
+PORTRAIT_TRANSITION_MS = 220
 REMINDER_CHECK_INTERVAL_MS = 30_000
 SUBTITLE_LANGUAGE_KEY = "SUBTITLE_LANGUAGE"
 SUBTITLE_LANGUAGE_JA = "ja"
@@ -87,7 +102,14 @@ class PetWindow(QWidget):
         self.system_prompt = load_character_system_prompt(character_profile)
         self.memory_store = MemoryStore(base_dir / "data" / "memory.json")
         self.reminder_store = ReminderStore(base_dir / "data" / "reminders.json")
-        self.tool_registry = create_builtin_tool_registry(base_dir, self.memory_store, self.reminder_store)
+        self.browser_controller = BrowserController(self)
+        self.browser_tool_bridge = BrowserToolBridge(self.browser_controller, self)
+        self.tool_registry = create_builtin_tool_registry(
+            base_dir,
+            self.memory_store,
+            self.reminder_store,
+            browser_executor=self.browser_tool_bridge,
+        )
         self.agent_runtime = AgentRuntime(
             api_client=api_client,
             system_prompt=self.system_prompt,
@@ -125,6 +147,8 @@ class PetWindow(QWidget):
         self.pending_screen_observation_messages: list[dict[str, Any]] | None = None
         self.active_reminder_id: str | None = None
         self.active_reminder_text = ""
+        self.portrait_transition_animation: QParallelAnimationGroup | None = None
+        self.portrait_transition_id = 0
         self.speech_timer = QTimer(self)
         self.speech_timer.setInterval(SPEECH_TYPING_INTERVAL_MS)
         self.speech_timer.timeout.connect(self._show_next_speech_char)
@@ -145,6 +169,18 @@ class PetWindow(QWidget):
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.label.customContextMenuRequested.connect(self._show_context_menu)
+        self.portrait_opacity_effect = QGraphicsOpacityEffect(self.label)
+        self.portrait_opacity_effect.setOpacity(1.0)
+        self.label.setGraphicsEffect(self.portrait_opacity_effect)
+
+        self.portrait_transition_label = QLabel(self)
+        self.portrait_transition_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.portrait_transition_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.portrait_transition_label.customContextMenuRequested.connect(self._show_context_menu)
+        self.portrait_transition_label.hide()
+        self.portrait_transition_opacity_effect = QGraphicsOpacityEffect(self.portrait_transition_label)
+        self.portrait_transition_opacity_effect.setOpacity(0.0)
+        self.portrait_transition_label.setGraphicsEffect(self.portrait_transition_opacity_effect)
 
         self.bubble = QFrame(self)
         self.bubble.setObjectName("speechBubble")
@@ -277,7 +313,13 @@ class PetWindow(QWidget):
             """
         )
         self._apply_fonts()
-        for drag_widget in (self.label, self.bubble, self.name_label, self.speech_label):
+        for drag_widget in (
+            self.label,
+            self.portrait_transition_label,
+            self.bubble,
+            self.name_label,
+            self.speech_label,
+        ):
             drag_widget.installEventFilter(self)
 
         self.pixmap = self._load_portrait()
@@ -358,26 +400,102 @@ class PetWindow(QWidget):
         next_portrait_path = self.character_profile.portrait_for_tone(tone)
         if next_portrait_path == self.portrait_path:
             return
+        should_crossfade = should_crossfade_portrait(self.portrait_path, next_portrait_path)
+        next_pixmap = self._load_portrait(next_portrait_path)
         self.portrait_path = next_portrait_path
-        self.pixmap = self._load_portrait()
-        self._apply_portrait()
+        if should_crossfade:
+            self._crossfade_portrait(next_pixmap)
+        else:
+            self.pixmap = next_pixmap
+            self._apply_portrait()
         if hasattr(self, "tray_icon"):
             self.tray_icon.setIcon(QIcon(self.pixmap) if not self.pixmap.isNull() else QIcon())
 
     def _apply_portrait(self) -> None:
+        self._stop_portrait_transition()
         if self.pixmap.isNull():
             self.resize(*self.stage_size)
             return
 
-        scaled = self.pixmap.scaled(
+        self._apply_pixmap_to_label(self.label, self.pixmap)
+        self.resize(*self.stage_size)
+        self._layout_stage()
+
+    def _apply_pixmap_to_label(self, label: QLabel, pixmap: QPixmap) -> None:
+        scaled = pixmap.scaled(
             560,
             570,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self.label.setPixmap(scaled)
-        self.label.resize(scaled.size())
+        label.setPixmap(scaled)
+        label.resize(scaled.size())
+
+    def _crossfade_portrait(self, next_pixmap: QPixmap) -> None:
+        self._stop_portrait_transition(finish_current=True)
+        self.pixmap = next_pixmap
+        if self.pixmap.isNull():
+            self._apply_portrait()
+            return
+
+        self._apply_pixmap_to_label(self.portrait_transition_label, self.pixmap)
         self.resize(*self.stage_size)
+        self._layout_stage()
+        self.portrait_opacity_effect.setOpacity(1.0)
+        self.portrait_transition_opacity_effect.setOpacity(0.0)
+        self.portrait_transition_label.show()
+        self.portrait_transition_label.raise_()
+        self.bubble.raise_()
+        self.input_bar.raise_()
+
+        self.portrait_transition_id += 1
+        transition_id = self.portrait_transition_id
+        animation = QParallelAnimationGroup(self)
+
+        fade_out = QPropertyAnimation(self.portrait_opacity_effect, b"opacity")
+        fade_out.setDuration(PORTRAIT_TRANSITION_MS)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+        fade_in = QPropertyAnimation(self.portrait_transition_opacity_effect, b"opacity")
+        fade_in.setDuration(PORTRAIT_TRANSITION_MS)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+        animation.addAnimation(fade_out)
+        animation.addAnimation(fade_in)
+        animation.finished.connect(lambda: self._finish_portrait_transition(transition_id))
+        self.portrait_transition_animation = animation
+        animation.start()
+
+    def _stop_portrait_transition(self, finish_current: bool = False) -> None:
+        if self.portrait_transition_animation is not None:
+            self.portrait_transition_animation.stop()
+            self.portrait_transition_animation.deleteLater()
+            self.portrait_transition_animation = None
+            self.portrait_transition_id += 1
+        self.portrait_transition_label.hide()
+        self.portrait_transition_label.clear()
+        self.portrait_opacity_effect.setOpacity(1.0)
+        self.portrait_transition_opacity_effect.setOpacity(0.0)
+        if finish_current and not self.pixmap.isNull():
+            self._apply_pixmap_to_label(self.label, self.pixmap)
+            self.resize(*self.stage_size)
+            self._layout_stage()
+
+    def _finish_portrait_transition(self, transition_id: int) -> None:
+        if transition_id != self.portrait_transition_id:
+            return
+        if self.portrait_transition_animation is not None:
+            self.portrait_transition_animation.deleteLater()
+            self.portrait_transition_animation = None
+        self._apply_pixmap_to_label(self.label, self.pixmap)
+        self.portrait_transition_label.hide()
+        self.portrait_transition_label.clear()
+        self.portrait_opacity_effect.setOpacity(1.0)
+        self.portrait_transition_opacity_effect.setOpacity(0.0)
         self._layout_stage()
 
     def _apply_fonts(self) -> None:
@@ -402,6 +520,12 @@ class PetWindow(QWidget):
         portrait_width = self.label.width()
         portrait_height = self.label.height()
         self.label.move((width - portrait_width) // 2, max(0, height - portrait_height - 62))
+        transition_width = self.portrait_transition_label.width()
+        transition_height = self.portrait_transition_label.height()
+        self.portrait_transition_label.move(
+            (width - transition_width) // 2,
+            max(0, height - transition_height - 62),
+        )
 
         bubble_width = min(640, width - 96)
         bubble_height = 128

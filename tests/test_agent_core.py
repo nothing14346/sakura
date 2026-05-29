@@ -7,10 +7,11 @@ import uuid
 import pytest
 
 from app.agent.actions import PendingToolAction
+from app.agent.builtin_tools import create_builtin_tool_registry
 from app.agent.memory import MemoryStore
 from app.agent.reminders import ReminderStore
-from app.agent.runtime import AgentRuntime, SCREEN_OBSERVATION_REQUEST_ACTION
-from app.agent.tool_registry import Tool, ToolRegistry
+from app.agent.runtime import AgentRuntime, SCREEN_OBSERVATION_REQUEST_ACTION, _build_tool_results_message
+from app.agent.tool_registry import Tool, ToolExecutionResult, ToolRegistry
 from app.api_client import ApiRequestError, is_vision_unsupported_error, messages_contain_image
 from app.screen_observation import (
     SCREEN_OBSERVATION_HISTORY_MARKER,
@@ -164,6 +165,133 @@ def test_tool_registry_free_access_keeps_file_delete_confirmation() -> None:
     assert result.tool_name == "delete_file"
 
 
+def test_builtin_registry_includes_browser_tools() -> None:
+    registry = create_builtin_tool_registry(Path(__file__).resolve().parents[1])
+
+    names = {tool["name"] for tool in registry.describe_tools()}
+
+    assert {
+        "browser_open_url",
+        "browser_get_content",
+        "browser_scroll",
+        "browser_click",
+        "browser_get_state",
+    }.issubset(names)
+
+
+def test_browser_open_url_rejects_non_http_url() -> None:
+    registry = create_builtin_tool_registry(Path(__file__).resolve().parents[1])
+
+    result = registry.execute("browser_open_url", {"url": "file:///C:/secret.txt"})
+
+    assert not result.success
+    assert "URL 只支持" in result.error
+
+
+def test_browser_confirmation_tools_return_pending_actions() -> None:
+    registry = create_builtin_tool_registry(
+        Path(__file__).resolve().parents[1],
+        browser_executor=_FakeBrowserExecutor(),
+    )
+
+    open_result = registry.prepare_or_execute("browser_open_url", {"url": "https://example.com"})
+    scroll_result = registry.prepare_or_execute("browser_scroll", {"direction": "down"})
+    click_result = registry.prepare_or_execute("browser_click", {"selector": "button"})
+
+    assert isinstance(open_result, PendingToolAction)
+    assert isinstance(scroll_result, PendingToolAction)
+    assert isinstance(click_result, PendingToolAction)
+
+
+def test_browser_confirmation_tools_obey_free_access() -> None:
+    registry = create_builtin_tool_registry(
+        Path(__file__).resolve().parents[1],
+        browser_executor=_FakeBrowserExecutor(),
+    )
+    registry.set_free_access_enabled(True)
+
+    result = registry.prepare_or_execute("browser_scroll", {"direction": "down", "amount": 1200})
+
+    assert not isinstance(result, PendingToolAction)
+    assert result.success
+    assert result.content["scroll_y"] == 1200
+
+
+def test_browser_get_content_truncates_text_and_links() -> None:
+    registry = create_builtin_tool_registry(
+        Path(__file__).resolve().parents[1],
+        browser_executor=_FakeBrowserExecutor(),
+    )
+
+    result = registry.execute("browser_get_content", {"max_chars": 5})
+
+    assert result.success
+    assert result.content["text"] == "abcde"
+    assert len(result.content["links"]) == 20
+
+
+def test_browser_tools_validate_arguments() -> None:
+    registry = create_builtin_tool_registry(
+        Path(__file__).resolve().parents[1],
+        browser_executor=_FakeBrowserExecutor(),
+    )
+
+    bad_direction = registry.execute("browser_scroll", {"direction": "sideways"})
+    bad_selector = registry.execute("browser_click", {"selector": ""})
+
+    assert not bad_direction.success
+    assert "direction 只支持" in bad_direction.error
+    assert not bad_selector.success
+    assert "缺少必填参数" in bad_selector.error
+
+
+def test_browser_screenshot_fallback_is_attached_as_image_url() -> None:
+    result = ToolExecutionResult(
+        tool_name="browser_get_content",
+        success=True,
+        content={
+            "url": "https://example.com",
+            "title": "Canvas Page",
+            "text": "",
+            "screenshot_data_url": "data:image/jpeg;base64,abc123",
+            "screenshot_fallback": True,
+        },
+    )
+
+    message = _build_tool_results_message([result], include_images=True)
+
+    content = message["content"]
+    assert isinstance(content, list)
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {
+            "url": "data:image/jpeg;base64,abc123",
+            "detail": "low",
+        },
+    }
+    assert "screenshot_data_url" not in content[0]["text"]
+    assert "screenshot_attached" in content[0]["text"]
+
+
+def test_browser_screenshot_fallback_is_not_attached_without_vision() -> None:
+    result = ToolExecutionResult(
+        tool_name="browser_get_content",
+        success=True,
+        content={
+            "url": "https://example.com",
+            "title": "Canvas Page",
+            "text": "",
+            "screenshot_data_url": "data:image/jpeg;base64,abc123",
+        },
+    )
+
+    message = _build_tool_results_message([result], include_images=False)
+
+    assert isinstance(message["content"], str)
+    assert "screenshot_data_url" not in message["content"]
+    assert "screenshot_attached" in message["content"]
+
+
 def test_model_vision_enabled_allows_model_to_request_screen_observation() -> None:
     class ScreenRequestClient:
         def __init__(self) -> None:
@@ -270,3 +398,47 @@ def test_plain_text_messages_do_not_contain_image() -> None:
 def _runtime_json_path(name: str) -> Path:
     root = Path(__file__).resolve().parents[1] / "__pycache__" / "test_runtime" / uuid.uuid4().hex
     return root / f"{name}.json"
+
+
+class _FakeBrowserExecutor:
+    def execute_browser_tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+        if name == "browser_open_url":
+            return {
+                "url": arguments["url"],
+                "title": "Example Domain",
+                "opened": True,
+                "loaded": True,
+            }
+        if name == "browser_get_content":
+            return {
+                "url": "https://example.com",
+                "title": "Example Domain",
+                "text": "abcdefghijklmnopqrstuvwxyz",
+                "links": [
+                    {"text": f"Link {index}", "href": f"https://example.com/{index}"}
+                    for index in range(25)
+                ],
+            }
+        if name == "browser_scroll":
+            amount = int(arguments.get("amount", 800))
+            direction = str(arguments.get("direction", "down"))
+            return {
+                "url": "https://example.com",
+                "title": "Example Domain",
+                "scroll_y": -amount if direction == "up" else amount,
+            }
+        if name == "browser_click":
+            return {
+                "ok": True,
+                "url": "https://example.com",
+                "title": "Example Domain",
+                "selector": arguments["selector"],
+            }
+        if name == "browser_get_state":
+            return {
+                "url": "https://example.com",
+                "title": "Example Domain",
+                "scroll_y": 0,
+                "loading": False,
+            }
+        raise ValueError(name)

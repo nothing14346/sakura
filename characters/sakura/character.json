@@ -10,6 +10,7 @@
       "冷静": "portraits/idle_neutral_A010.png",
       "困惑": "portraits/react_confused_o_A040.png",
       "满意": "portraits/blink_smile_A050.png",
+      "甜蜜": "portraits/shy_blush_A061.png",
       "害羞": "portraits/shy_blush_A061.png",
       "惊讶": "portraits/react_surprised_A110.png",
       "严肃": "portraits/talk_scold_A120.png",
@@ -18,40 +19,36 @@
       "无奈": "portraits/sigh_eyes_closed_A160.png",
       "俏皮": "portraits/wink_playful_A180.png",
       "不满": "portraits/pout_skeptical_A230.png",
+      "吃醋": "portraits/pout_skeptical_A230.png",
       "自信": "portraits/confident_neutral_B010.png",
       "提醒": "portraits/confident_callout_B120.png",
       "调侃": "portraits/confident_teasing_B170.png",
       "招呼": "portraits/gesture_wave_neutral_I010.png",
       "引导": "portraits/gesture_invite_smile_I170.png",
+      "晚安": "portraits/gesture_goodbye_smile_I180.png",
       "告别": "portraits/gesture_goodbye_smile_I180.png"
     }
   },
   "voice": {
     "gpt_model": "voice/models/Sakura-e15.ckpt",
     "sovits_model": "voice/models/Sakura_e8_s7176.pth",
+    "ref_lang": "ja",
     "text_lang": "ja",
     "tone_refs": "voice/refs/ref.txt"
   },
   "reply": {
     "tones": [
       "中性",
-      "冷静",
-      "困惑",
-      "满意",
-      "害羞",
-      "惊讶",
-      "严肃",
       "低落",
-      "无语",
-      "无奈",
+      "严肃",
+      "请求",
+      "困惑",
+      "惊讶",
       "俏皮",
-      "不满",
       "自信",
-      "提醒",
-      "调侃",
-      "招呼",
-      "引导",
-      "告别"
+      "晚安",
+      "害羞",
+      "吃醋"
     ]
   }
 }
