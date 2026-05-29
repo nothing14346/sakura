@@ -14,6 +14,7 @@ from PySide6.QtCore import QObject, QUrl, Signal, Slot
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from app.chat_reply import DEFAULT_TONE
+from app.env_config import load_env_file, save_env_values
 
 
 class TTSProvider(Protocol):
@@ -45,6 +46,7 @@ class GPTSoVITSTTSSettings:
     enabled: bool
     api_url: str
     ref_audio_path: Path
+    ref_text_path: Path
     ref_text: str
     ref_lang: str = "ja"
     text_lang: str = "ja"
@@ -52,8 +54,13 @@ class GPTSoVITSTTSSettings:
     tone_references: dict[str, list[ToneReference]] = field(default_factory=dict)
 
     @classmethod
-    def load(cls, env_path: Path, base_dir: Path) -> "GPTSoVITSTTSSettings":
-        values = _load_env_file(env_path)
+    def load(
+        cls,
+        env_path: Path,
+        base_dir: Path,
+        validate_enabled: bool = True,
+    ) -> "GPTSoVITSTTSSettings":
+        values = load_env_file(env_path)
         enabled = _is_enabled(_get_env_value(values, "TTS_ENABLED", "false"))
 
         ref_audio_text = _get_env_value(
@@ -93,13 +100,14 @@ class GPTSoVITSTTSSettings:
                 "http://127.0.0.1:9880/tts",
             ).strip(),
             ref_audio_path=ref_audio_path,
+            ref_text_path=ref_text_path,
             ref_text=ref_text.strip(),
             ref_lang=_get_env_value(values, "GPT_SOVITS_REF_LANG", "ja").strip(),
             text_lang=_get_env_value(values, "GPT_SOVITS_TEXT_LANG", "ja").strip(),
             timeout_seconds=timeout_seconds,
             tone_references=_load_tone_references(tone_ref_path, base_dir),
         )
-        if settings.enabled:
+        if settings.enabled and validate_enabled:
             settings.validate()
         return settings
 
@@ -124,6 +132,20 @@ class GPTSoVITSTTSSettings:
             raise TTSConfigError("缺少 GPT_SOVITS_REF_LANG。")
         if not self.text_lang:
             raise TTSConfigError("缺少 GPT_SOVITS_TEXT_LANG。")
+
+    def save(self, env_path: Path, base_dir: Path) -> None:
+        """将 GPT-SoVITS 基础配置写入 .env。"""
+        _ = base_dir
+        save_env_values(
+            env_path,
+            {
+                "TTS_ENABLED": "true" if self.enabled else "false",
+                "GPT_SOVITS_API_URL": self.api_url.strip(),
+                "GPT_SOVITS_REF_LANG": self.ref_lang.strip(),
+                "GPT_SOVITS_TEXT_LANG": self.text_lang.strip(),
+                "GPT_SOVITS_TIMEOUT_SECONDS": str(self.timeout_seconds),
+            },
+        )
 
 
 class GPTSoVITSTTSProvider(QObject):
@@ -287,18 +309,15 @@ class GPTSoVITSTTSProvider(QObject):
         self._current_audio = None
 
 
-def _load_env_file(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
+def create_tts_provider(base_dir: Path) -> TTSProvider:
+    """按当前 .env 创建 TTS provider，配置无效时自动降级为静音实现。"""
+    try:
+        settings = GPTSoVITSTTSSettings.load(base_dir / ".env", base_dir)
+        if settings.enabled:
+            return GPTSoVITSTTSProvider(settings)
+    except TTSConfigError as exc:
+        print(f"[TTS] 配置无效，已禁用 TTS：{exc}")
+    return NullTTSProvider()
 
 
 def _get_env_value(values: dict[str, str], key: str, default: str) -> str:

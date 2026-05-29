@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app.chat_reply import ChatReply, parse_chat_reply
+from app.env_config import load_env_file, save_env_values
 
 
 SEGMENTED_REPLY_INSTRUCTION = """
@@ -43,7 +44,7 @@ class ApiSettings:
 
     @classmethod
     def load(cls, env_path: Path) -> "ApiSettings":
-        values = _load_env_file(env_path)
+        values = load_env_file(env_path)
 
         base_url = (
             os.getenv("BASE_URL")
@@ -86,7 +87,7 @@ class ApiSettings:
 
     def save(self, env_path: Path) -> None:
         """将聊天 API 配置写入 .env，并保留其他配置项。"""
-        _save_env_values(
+        save_env_values(
             env_path,
             {
                 "BASE_URL": self.base_url.strip().rstrip("/"),
@@ -157,52 +158,3 @@ class OpenAICompatibleClient:
 
         return parse_chat_reply(str(content).strip())
 
-
-def _load_env_file(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
-
-
-def _save_env_values(path: Path, updates: dict[str, str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-
-    saved_keys: set[str] = set()
-    output_lines: list[str] = []
-    for raw_line in existing_lines:
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in raw_line:
-            output_lines.append(raw_line)
-            continue
-
-        key = raw_line.split("=", 1)[0].strip()
-        if key not in updates:
-            output_lines.append(raw_line)
-            continue
-
-        if key in saved_keys:
-            continue
-        output_lines.append(f"{key}={_format_env_value(updates[key])}")
-        saved_keys.add(key)
-
-    for key, value in updates.items():
-        if key not in saved_keys:
-            output_lines.append(f"{key}={_format_env_value(value)}")
-
-    path.write_text("\n".join(output_lines).rstrip() + "\n", encoding="utf-8")
-
-
-def _format_env_value(value: str) -> str:
-    if not value or any(char.isspace() for char in value) or "#" in value:
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
-    return value

@@ -20,12 +20,18 @@ from PySide6.QtWidgets import (
 )
 
 from app.api_client import OpenAICompatibleClient
-from app.api_settings_dialog import ApiSettingsDialog
 from app.chat_history import ChatHistoryStore
 from app.chat_reply import ChatReply, ChatSegment
 from app.chat_worker import ChatWorker
 from app.history_window import HistoryWindow
-from app.tts import TTSProvider
+from app.settings_dialog import SettingsDialog
+from app.tts import (
+    GPTSoVITSTTSProvider,
+    GPTSoVITSTTSSettings,
+    NullTTSProvider,
+    TTSConfigError,
+    TTSProvider,
+)
 
 
 SPEECH_TYPING_INTERVAL_MS = 35
@@ -48,6 +54,7 @@ class PetWindow(QWidget):
         self.api_client = api_client
         self.system_prompt = system_prompt
         self.tts_provider = tts_provider
+        self.retired_tts_providers: list[TTSProvider] = []
         self.history_store = ChatHistoryStore(base_dir / "data" / "chat_history.jsonl")
         self.history_window: HistoryWindow | None = None
         self.messages: list[dict[str, str]] = []
@@ -307,9 +314,9 @@ class PetWindow(QWidget):
         history_action.triggered.connect(self.show_history)
         menu.addAction(history_action)
 
-        api_settings_action = QAction("API 设置", self)
-        api_settings_action.triggered.connect(self.show_api_settings)
-        menu.addAction(api_settings_action)
+        settings_action = QAction("设置", self)
+        settings_action.triggered.connect(self.show_settings)
+        menu.addAction(settings_action)
 
         menu.addSeparator()
 
@@ -435,19 +442,60 @@ class PetWindow(QWidget):
         self.history_window.activateWindow()
 
     @Slot()
-    def show_api_settings(self) -> None:
-        dialog = ApiSettingsDialog(self.api_client.settings, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.result_settings is None:
+    def show_settings(self) -> None:
+        try:
+            tts_settings = GPTSoVITSTTSSettings.load(self.env_path, self.base_dir, validate_enabled=False)
+        except (OSError, TTSConfigError) as exc:
+            QMessageBox.warning(self, "配置读取失败", f"TTS 配置读取失败，将使用默认值打开设置：{exc}")
+            tts_settings = self._default_tts_settings()
+
+        dialog = SettingsDialog(self.api_client.settings, tts_settings, self.base_dir, self)
+        if (
+            dialog.exec() != QDialog.DialogCode.Accepted
+            or dialog.result_api_settings is None
+            or dialog.result_tts_settings is None
+        ):
             return
 
         try:
-            dialog.result_settings.save(self.env_path)
+            dialog.result_api_settings.save(self.env_path)
+            dialog.result_tts_settings.save(self.env_path, self.base_dir)
         except OSError as exc:
-            QMessageBox.critical(self, "保存失败", f"无法保存 API 设置：{exc}")
+            QMessageBox.critical(self, "保存失败", f"无法保存设置：{exc}")
             return
 
-        self.api_client.update_settings(dialog.result_settings)
-        QMessageBox.information(self, "保存成功", "API 设置已保存，后续聊天将使用新配置。")
+        new_tts_provider = self._create_tts_provider_from_settings(dialog.result_tts_settings)
+        if new_tts_provider is None:
+            return
+
+        self.api_client.update_settings(dialog.result_api_settings)
+        self.retired_tts_providers.append(self.tts_provider)
+        self.tts_provider = new_tts_provider
+        QMessageBox.information(self, "保存成功", "设置已保存，后续聊天和朗读将使用新配置。")
+
+    def _create_tts_provider_from_settings(
+        self,
+        settings: GPTSoVITSTTSSettings,
+    ) -> TTSProvider | None:
+        if not settings.enabled:
+            return NullTTSProvider()
+        try:
+            return GPTSoVITSTTSProvider(settings)
+        except TTSConfigError as exc:
+            QMessageBox.critical(self, "TTS 配置无效", f"无法启用 TTS，当前语音配置保持不变：{exc}")
+            return None
+
+    def _default_tts_settings(self) -> GPTSoVITSTTSSettings:
+        return GPTSoVITSTTSSettings(
+            enabled=False,
+            api_url="http://127.0.0.1:9880/tts",
+            ref_audio_path=self.base_dir / "ref" / "VO01_2210.ogg",
+            ref_text_path=self.base_dir / "ref" / "text.txt",
+            ref_text="",
+            ref_lang="ja",
+            text_lang="ja",
+            timeout_seconds=60,
+        )
 
     def _record_history(self, role: str, content: str) -> None:
         try:
