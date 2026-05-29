@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from app.agent.actions import AgentAction, AgentEvent, AgentResult, MemoryUpdate
@@ -126,6 +127,7 @@ class AgentRuntime:
         )
         tones = "、".join(tone for tone in self.reply_tones if tone.strip()) or "中性"
         memory_summary = self._memory_summary()
+        current_time = datetime.now().astimezone().isoformat(timespec="seconds")
         return f"""
 {self.system_prompt.strip()}
 
@@ -135,6 +137,9 @@ class AgentRuntime:
 
 长期记忆摘要：
 {memory_summary}
+
+当前本地时间：
+{current_time}
 
 可用工具：
 {tool_descriptions}
@@ -151,12 +156,21 @@ class AgentRuntime:
   ]
 }}
 
+分段规则：
+- 尽量输出 2-4 段文本，每段是一条可以单独显示和朗读的完整小消息，不要把一句话机械切碎。
+- 单段建议 35-90 个中文或日文字符；内容需要完整自然，宁可少分段也不要短到像碎片。
+- 用户问题包含多个要点、步骤、原因或较长说明时，优先输出 3-4 段，让桌宠可以逐段显示和朗读。
+- 如果用户只问很简单的问题，可以只输出 1-2 段。
+- 不要因为返回格式示例里只写了一条 segment，就把完整回复固定成一段。
+
 要求：
 - tone 只能从这些类别中选择：{tones}。
 - ja 中只写夜乃桜要说出口的日文原文，必须是日语，适合直接交给日语 TTS 朗读。
 - zh 中只写 ja 对应的自然中文译文，必须是中文。
 - 如果工具可以帮助完成用户请求，优先用 tool_calls 表达要执行的动作。
 - 不要臆造工具名；只能使用上面列出的工具。
+- 用户说“几分钟后/几秒后/一会儿后”等相对提醒时，add_reminder 必须使用 delay_minutes 或 delay_seconds，不要自己换算 trigger_at。
+- 只有用户给出明确日期或钟点时，add_reminder 才使用 trigger_at。
 - 不要静默写入长期记忆；只有用户明确要求记住时，才使用 propose_memory_update。
 - 只有用户明确确认候选记忆时，才使用 confirm_memory_update。
 - 只有用户明确要求忘掉信息时，才使用 forget_memory。

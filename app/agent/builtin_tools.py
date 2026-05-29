@@ -59,21 +59,29 @@ def create_builtin_tool_registry(
             ),
             Tool(
                 name="add_reminder",
-                description="创建一次性提醒。trigger_at 必须是本地时区 ISO 时间；repeat 第一版只支持 null 或省略。",
+                description="创建一次性提醒。用户说“几分钟后/几秒后”这类相对时间时，必须优先使用 delay_seconds 或 delay_minutes，让程序计算触发时间；只有用户给出明确日期时间时才使用 trigger_at。repeat 第一版只支持 null 或省略。",
                 parameters={
                     "type": "object",
                     "properties": {
                         "text": {"type": "string", "description": "提醒内容。"},
                         "trigger_at": {
                             "type": "string",
-                            "description": "提醒时间，本地时区 ISO 字符串。",
+                            "description": "明确的提醒时间，本地时区 ISO 字符串。相对时间不要使用这个字段。",
+                        },
+                        "delay_seconds": {
+                            "type": "number",
+                            "description": "从现在开始延迟多少秒触发。适合“30 秒后”等相对提醒。",
+                        },
+                        "delay_minutes": {
+                            "type": "number",
+                            "description": "从现在开始延迟多少分钟触发。适合“3 分钟后”等相对提醒。",
                         },
                         "repeat": {
                             "type": ["null"],
                             "description": "第一版只支持 null。",
                         },
                     },
-                    "required": ["text", "trigger_at"],
+                    "required": ["text"],
                 },
                 handler=reminders.add_reminder,
             ),

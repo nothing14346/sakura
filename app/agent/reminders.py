@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +38,7 @@ class ReminderStore:
 
     def add_reminder(self, arguments: dict[str, Any]) -> dict[str, Any]:
         text = _required_text(arguments, "text")
-        trigger_at = _normalize_trigger_at(_required_text(arguments, "trigger_at"))
+        trigger_at = _resolve_trigger_at(arguments)
         repeat = arguments.get("repeat")
         if repeat is not None:
             raise ValueError("第一版提醒暂不支持 repeat，请传 null 或省略。")
@@ -159,6 +159,38 @@ def _required_text(arguments: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"缺少必填参数：{key}")
     return value.strip()
+
+
+def _resolve_trigger_at(arguments: dict[str, Any]) -> str:
+    delay_seconds = _optional_number(arguments, "delay_seconds")
+    delay_minutes = _optional_number(arguments, "delay_minutes")
+    trigger_at = arguments.get("trigger_at")
+
+    if delay_seconds is not None or delay_minutes is not None:
+        total_seconds = 0.0
+        if delay_seconds is not None:
+            total_seconds += delay_seconds
+        if delay_minutes is not None:
+            total_seconds += delay_minutes * 60
+        if total_seconds <= 0:
+            raise ValueError("相对提醒时间必须大于 0 秒。")
+        return (datetime.now().astimezone() + timedelta(seconds=total_seconds)).isoformat(timespec="seconds")
+
+    if isinstance(trigger_at, str) and trigger_at.strip():
+        parsed = _parse_datetime(trigger_at)
+        if parsed <= datetime.now().astimezone():
+            raise ValueError("提醒时间必须晚于当前时间。相对时间请使用 delay_seconds 或 delay_minutes。")
+        return parsed.isoformat(timespec="seconds")
+    raise ValueError("缺少提醒时间：请提供 trigger_at、delay_seconds 或 delay_minutes。")
+
+
+def _optional_number(arguments: dict[str, Any], key: str) -> float | None:
+    value = arguments.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{key} 必须是数字。")
+    return float(value)
 
 
 def _normalize_trigger_at(value: str) -> str:
