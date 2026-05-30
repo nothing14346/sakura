@@ -658,6 +658,121 @@ def test_tool_result_for_model_truncates_large_content() -> None:
     assert "tail" in content
 
 
+def test_agent_runtime_can_continue_tool_loop_after_tool_results() -> None:
+    class MultiStepClient:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.messages: list[list[dict[str, object]]] = []
+            self.final_chat_called = False
+
+        def complete_raw(self, system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.prompts.append(system_prompt)
+            self.messages.append(messages)
+            call_index = len(self.prompts)
+            if call_index == 1:
+                return (
+                    '{"reply":{"segments":[{"ja":"まず確認するね。","zh":"我先确认一下。","tone":"中性"}]},'
+                    '"tool_calls":[{"name":"first_tool","arguments":{"value":"start"},"reason":"先取第一步结果"}]}'
+                )
+            if call_index == 2:
+                assert "first_result" in str(messages)
+                return (
+                    '{"reply":{"segments":[{"ja":"次も見るね。","zh":"我再看下一步。","tone":"中性"}]},'
+                    '"tool_calls":[{"name":"second_tool","arguments":{"value":"next"},"reason":"根据第一步结果继续"}]}'
+                )
+            assert "second_result" in str(messages)
+            return (
+                '{"reply":{"segments":[{"ja":"二つとも確認できたよ。","zh":"两步都确认好了。","tone":"中性"}]},'
+                '"tool_calls":[]}'
+            )
+
+        def chat(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.final_chat_called = True
+            from app.chat_reply import parse_chat_reply
+
+            return parse_chat_reply(
+                '{"segments":[{"ja":"fallback","zh":"fallback","tone":"中性"}]}'
+            )
+
+    registry = ToolRegistry(
+        [
+            Tool(
+                name="first_tool",
+                description="第一步工具",
+                handler=lambda arguments: {"first_result": arguments["value"]},
+            ),
+            Tool(
+                name="second_tool",
+                description="第二步工具",
+                handler=lambda arguments: {"second_result": arguments["value"]},
+            ),
+        ]
+    )
+    client = MultiStepClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=registry,
+    )
+
+    result = runtime.handle_user_message([{"role": "user", "content": "连续处理这个任务"}])
+
+    assert result.reply.translation == "两步都确认好了。"
+    assert [action.payload["tool_name"] for action in result.actions] == ["first_tool", "second_tool"]
+    assert len(client.prompts) == 3
+    assert not client.final_chat_called
+    assert "这是第 1 步" in client.prompts[0]
+    assert "这是第 2 步" in client.prompts[1]
+
+
+def test_agent_runtime_stops_tool_loop_at_turn_limit() -> None:
+    class RepeatingToolClient:
+        def __init__(self) -> None:
+            self.raw_calls = 0
+            self.chat_messages: list[dict[str, object]] = []
+
+        def complete_raw(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.raw_calls += 1
+            return (
+                '{"reply":{"segments":[{"ja":"続けるね。","zh":"继续。","tone":"中性"}]},'
+                '"tool_calls":[{"name":"echo_tool","arguments":{},"reason":"测试上限"},'
+                '{"name":"echo_tool","arguments":{},"reason":"测试上限"},'
+                '{"name":"echo_tool","arguments":{},"reason":"测试上限"}]}'
+            )
+
+        def chat(self, _system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.chat_messages = messages
+            from app.chat_reply import parse_chat_reply
+
+            return parse_chat_reply(
+                '{"segments":[{"ja":"上限で止めたよ。","zh":"已经按上限停止了。","tone":"中性"}]}'
+            )
+
+    registry = ToolRegistry(
+        [
+            Tool(
+                name="echo_tool",
+                description="回显工具",
+                handler=lambda _arguments: {"ok": True},
+            )
+        ]
+    )
+    client = RepeatingToolClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=registry,
+    )
+
+    result = runtime.handle_user_message([{"role": "user", "content": "一直调用工具"}])
+
+    assert result.reply.translation == "已经按上限停止了。"
+    assert len([action for action in result.actions if action.payload["tool_name"] == "echo_tool"]) == 8
+    assert any(action.payload["tool_name"] == "runtime" for action in result.actions)
+    assert client.raw_calls == 3
+    assert "已跳过" in str(client.chat_messages)
+
+
 def test_trim_messages_for_model_keeps_recent_messages_without_mutating_history() -> None:
     messages = [
         {"role": "user", "content": f"message {index}"}
@@ -858,13 +973,12 @@ def test_proactive_check_event_generates_segmented_reply() -> None:
             self.prompts: list[str] = []
             self.messages: list[list[dict[str, object]]] = []
 
-        def chat(self, system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        def complete_raw(self, system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
             self.prompts.append(system_prompt)
             self.messages.append(messages)
-            from app.chat_reply import parse_chat_reply
-
-            return parse_chat_reply(
-                '{"segments":[{"ja":"少し休もう。","zh":"稍微休息一下吧。","tone":"提醒"}]}'
+            return (
+                '{"reply":{"segments":[{"ja":"少し休もう。","zh":"稍微休息一下吧。","tone":"提醒"}]},'
+                '"tool_calls":[]}'
             )
 
     client = ProactiveClient()
@@ -877,14 +991,23 @@ def test_proactive_check_event_generates_segmented_reply() -> None:
         AgentEvent(
             type="proactive_check",
             payload={
-                "idle_seconds": 1800,
+                "seconds_since_pet_interaction": 1800,
                 "check_interval_minutes": 20,
                 "screen_context_allowed": False,
             },
         )
     )
 
-    assert "低打扰主动关怀" in client.prompts[0]
+    assert "低打扰主动搭话" in client.prompts[0]
+    assert "主动搭话不是关怀模板" in client.prompts[0]
+    assert "只表示用户一段时间没有和桌宠交互" in client.prompts[0]
+    assert "不代表用户离开" in client.prompts[0]
+    assert "不要根据 seconds_since_pet_interaction 说“没动静”" in client.prompts[0]
+    assert "自然搭话、提问或提醒用户" in client.prompts[0]
+    assert "tone 和 portrait 要根据内容选择" in client.prompts[0]
+    assert "自然搭话" in str(client.messages[0][0]["content"])
+    assert "seconds_since_pet_interaction" in str(client.messages[0][0]["content"])
+    assert "idle_seconds" not in str(client.messages[0][0]["content"])
     assert result.reply.translation == "稍微休息一下吧。"
     assert result.actions[0].payload["event_type"] == "proactive_check"
 
@@ -892,14 +1015,15 @@ def test_proactive_check_event_generates_segmented_reply() -> None:
 def test_proactive_check_event_attaches_screen_context_image() -> None:
     class ProactiveImageClient:
         def __init__(self) -> None:
+            self.prompts: list[str] = []
             self.messages: list[list[dict[str, object]]] = []
 
-        def chat(self, _system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        def complete_raw(self, system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.prompts.append(system_prompt)
             self.messages.append(messages)
-            from app.chat_reply import parse_chat_reply
-
-            return parse_chat_reply(
-                '{"segments":[{"ja":"画面は見たよ。","zh":"我看过画面了。","tone":"提醒"}]}'
+            return (
+                '{"reply":{"segments":[{"ja":"画面は見たよ。","zh":"我看过画面了。","tone":"提醒"}]},'
+                '"tool_calls":[]}'
             )
 
     client = ProactiveImageClient()
@@ -928,11 +1052,75 @@ def test_proactive_check_event_attaches_screen_context_image() -> None:
     assert content[1]["image_url"]["url"] == "data:image/jpeg;base64,abc123"
     assert "abc123" not in content[0]["text"]
     assert "image_attached" in content[0]["text"]
+    assert "优先理解屏幕画面本身" in client.prompts[0]
+    assert "找到屏幕话题时，不要在结尾追加" in client.prompts[0]
+    assert "轻微吃醋" in client.prompts[0]
+    assert "主动搭话时不要固定使用“提醒”语气" in client.prompts[0]
+    assert "自然搭话" in content[0]["text"]
+
+
+def test_proactive_check_event_can_continue_tool_loop_after_tool_results() -> None:
+    class ProactiveToolClient:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.messages: list[list[dict[str, object]]] = []
+
+        def complete_raw(self, system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.prompts.append(system_prompt)
+            self.messages.append(messages)
+            call_index = len(self.prompts)
+            if call_index == 1:
+                return (
+                    '{"reply":{"segments":[{"ja":"少し確認するね。","zh":"我稍微确认一下。","tone":"中性"}]},'
+                    '"tool_calls":[{"name":"browser_get_state","arguments":{},"reason":"看看当前受控浏览器状态"}]}'
+                )
+            assert "Example Page" in str(messages)
+            return (
+                '{"reply":{"segments":[{"ja":"ページは開いているみたい。ここで詰まってる？","zh":"页面像是已经打开了。你是卡在这里了吗？","tone":"中性"}]},'
+                '"tool_calls":[]}'
+            )
+
+    registry = ToolRegistry(
+        [
+            Tool(
+                name="browser_get_state",
+                description="读取当前浏览器状态",
+                handler=lambda _arguments: {
+                    "url": "https://example.com",
+                    "title": "Example Page",
+                    "loading": False,
+                },
+            )
+        ]
+    )
+    client = ProactiveToolClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=registry,
+    )
+
+    result = runtime.handle_event(
+        AgentEvent(
+            type="proactive_check",
+            payload={
+                "seconds_since_pet_interaction": 1800,
+                "screen_context_allowed": False,
+            },
+        )
+    )
+
+    assert result.reply.translation == "页面像是已经打开了。你是卡在这里了吗？"
+    assert [action.type for action in result.actions] == ["event", "tool_call"]
+    assert result.actions[1].payload["tool_name"] == "browser_get_state"
+    assert len(client.prompts) == 2
+    assert "主动检查事件" in client.prompts[0]
+    assert "不要为了显得主动而循环调用工具" in client.prompts[0]
 
 
 def test_proactive_check_vision_unsupported_uses_safe_fallback() -> None:
     class ProactiveVisionUnsupportedClient:
-        def chat(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        def complete_raw(self, *_args, **_kwargs) -> str:  # type: ignore[no-untyped-def]
             raise ApiRequestError("model does not support image_url content")
 
     runtime = AgentRuntime(
@@ -954,7 +1142,7 @@ def test_proactive_check_vision_unsupported_uses_safe_fallback() -> None:
     )
 
     assert "不会乱猜" in result.reply.translation
-    assert not result.actions
+    assert result.actions[0].payload["event_type"] == "proactive_check"
 
 
 def test_plain_text_messages_do_not_contain_image() -> None:

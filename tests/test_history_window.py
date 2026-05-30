@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import sys
+import types
+
+_STUBBED_PYSIDE = False
+if importlib.util.find_spec("PySide6") is None:
+    _STUBBED_PYSIDE = True
+    pyside_module = types.ModuleType("PySide6")
+    qtcore_module = types.ModuleType("PySide6.QtCore")
+    qtwidgets_module = types.ModuleType("PySide6.QtWidgets")
+    pyside_module.__spec__ = importlib.machinery.ModuleSpec("PySide6", loader=None)
+    qtcore_module.__spec__ = importlib.machinery.ModuleSpec("PySide6.QtCore", loader=None)
+    qtwidgets_module.__spec__ = importlib.machinery.ModuleSpec("PySide6.QtWidgets", loader=None)
+
+    class _Flag:
+        def __or__(self, _other: object) -> "_Flag":
+            return self
+
+    class Qt:
+        class AlignmentFlag:
+            AlignCenter = _Flag()
+            AlignLeft = _Flag()
+            AlignRight = _Flag()
+
+        class TextFormat:
+            PlainText = object()
+
+        class TextInteractionFlag:
+            LinksAccessibleByMouse = _Flag()
+            TextSelectableByMouse = _Flag()
+
+    class QTimer:
+        @staticmethod
+        def singleShot(*_args: object, **_kwargs: object) -> None:
+            pass
+
+    class _WidgetStub:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    class QFrame(_WidgetStub):
+        class Shape:
+            NoFrame = object()
+
+    class QMessageBox:
+        class StandardButton:
+            Yes = object()
+            No = object()
+
+    qtcore_module.QTimer = QTimer
+    qtcore_module.Qt = Qt
+    qtwidgets_module.QDialog = _WidgetStub
+    qtwidgets_module.QFrame = QFrame
+    qtwidgets_module.QHBoxLayout = _WidgetStub
+    qtwidgets_module.QLabel = _WidgetStub
+    qtwidgets_module.QMessageBox = QMessageBox
+    qtwidgets_module.QPushButton = _WidgetStub
+    qtwidgets_module.QScrollArea = _WidgetStub
+    qtwidgets_module.QVBoxLayout = _WidgetStub
+    qtwidgets_module.QWidget = _WidgetStub
+    sys.modules["PySide6"] = pyside_module
+    sys.modules["PySide6.QtCore"] = qtcore_module
+    sys.modules["PySide6.QtWidgets"] = qtwidgets_module
+
+from app.chat_history import ChatHistoryEntry
+from app.history_window import _entry_view_model
+
+if _STUBBED_PYSIDE:
+    sys.modules.pop("PySide6.QtWidgets", None)
+    sys.modules.pop("PySide6.QtCore", None)
+    sys.modules.pop("PySide6", None)
+
+
+def _entry(role: str, content: str, translation: str = "") -> ChatHistoryEntry:
+    return ChatHistoryEntry(
+        created_at="2026-05-30T16:20:30+08:00",
+        role=role,
+        content=content,
+        translation=translation,
+    )
+
+
+def test_entry_view_model_uses_distinct_role_layouts() -> None:
+    user_view = _entry_view_model(_entry("user", "你好"), "ja", "桜")
+    assistant_view = _entry_view_model(_entry("assistant", "こんばんは"), "ja", "桜")
+    error_view = _entry_view_model(_entry("error", "请求失败"), "ja", "桜")
+    system_view = _entry_view_model(_entry("system", "已附加当前屏幕截图"), "ja", "桜")
+
+    assert user_view.meta_text == "你 · 2026-05-30 16:20:30"
+    assert user_view.align == "right"
+    assert user_view.bubble_object_name == "userBubble"
+    assert assistant_view.meta_text == "桜 · 2026-05-30 16:20:30"
+    assert assistant_view.align == "left"
+    assert assistant_view.bubble_object_name == "assistantBubble"
+    assert error_view.role_name == "错误"
+    assert error_view.bubble_object_name == "errorBubble"
+    assert system_view.role_name == "系统记录"
+    assert system_view.align == "center"
+    assert system_view.bubble_object_name == "systemBubble"
+
+
+def test_entry_view_model_keeps_plain_text_content() -> None:
+    view = _entry_view_model(_entry("user", "<script>x</script> & one\ntwo"), "ja", "桜")
+
+    assert view.content == "<script>x</script> & one\ntwo"
+
+
+def test_entry_view_model_uses_translation_only_for_chinese_assistant_subtitles() -> None:
+    entry = _entry("assistant", "原文", "译文")
+
+    zh_view = _entry_view_model(entry, "zh", "桜")
+    ja_view = _entry_view_model(entry, "ja", "桜")
+
+    assert zh_view.content == "译文"
+    assert ja_view.content == "原文"

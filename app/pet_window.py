@@ -289,8 +289,8 @@ class PetWindow(QWidget):
         self.setStyleSheet(
             """
             #speechBubble {
-                background: rgba(255, 232, 241, 188);
-                border: 1px solid rgba(238, 172, 200, 132);
+                background: rgba(255, 232, 241, 220);
+                border: 1px solid rgba(238, 172, 200, 158);
                 border-radius: 26px;
             }
             #speakerName {
@@ -593,7 +593,7 @@ class PetWindow(QWidget):
         input_height = 44
         input_gap = 10
         bubble_x = (width - bubble_width) // 2
-        bubble_y = height - bubble_height - input_height - input_gap - 108
+        bubble_y = height - bubble_height - input_height - input_gap - 84
         self.bubble.setGeometry(QRect(bubble_x, bubble_y, bubble_width, bubble_height))
         self.bubble.raise_()
 
@@ -1054,8 +1054,8 @@ class PetWindow(QWidget):
             return False
 
         now = time.perf_counter()
-        idle_seconds = now - self.last_user_activity_at
-        if idle_seconds < self.proactive_care_settings.check_interval_minutes * 60:
+        seconds_since_pet_interaction = now - self.last_user_activity_at
+        if seconds_since_pet_interaction < self.proactive_care_settings.check_interval_minutes * 60:
             return False
         if (
             self.last_proactive_care_at is not None
@@ -1068,7 +1068,7 @@ class PetWindow(QWidget):
         now = time.perf_counter()
         payload: dict[str, Any] = {
             "triggered_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "idle_seconds": int(now - self.last_user_activity_at),
+            "seconds_since_pet_interaction": int(now - self.last_user_activity_at),
             "check_interval_minutes": self.proactive_care_settings.check_interval_minutes,
             "cooldown_minutes": self.proactive_care_settings.cooldown_minutes,
             "screen_context_allowed": self._proactive_screen_context_allowed(),

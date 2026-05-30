@@ -25,7 +25,9 @@ from app.chat_reply import ChatReply, parse_chat_reply
 from app.debug_log import debug_log, summarize_messages
 
 
-MAX_TOOL_CALLS_PER_TURN = 3
+MAX_AGENT_STEPS_PER_TURN = 4
+MAX_TOOL_CALLS_PER_STEP = 3
+MAX_TOOL_CALLS_PER_TURN = 8
 MAX_TOOL_RESULT_CHARS = 6000
 
 
@@ -77,148 +79,239 @@ class AgentRuntime:
                 "messages": summarize_messages(messages),
             },
         )
-        try:
-            planning_started_at = time.perf_counter()
-            first_content = self.api_client.complete_raw(
-                self._build_tool_planning_prompt(allow_screen_observation=allow_screen_observation),
-                messages,
-                temperature=0.8,
-            )
-        except ApiRequestError as exc:
-            if messages_contain_image(messages) and is_vision_unsupported_error(exc):
-                debug_log("AgentRuntime", "视觉输入不受支持，返回兜底回复", {"error": str(exc)})
-                return AgentResult(reply=_build_vision_unsupported_reply())
-            raise
-        debug_log(
-            "AgentRuntime",
-            "工具规划模型返回",
-            {
-                "content": first_content,
-                "planning_elapsed_ms": int((time.perf_counter() - planning_started_at) * 1000),
-            },
+        return self._run_tool_loop(
+            messages,
+            allow_screen_observation=allow_screen_observation,
+            turn_started_at=turn_started_at,
+            vision_unsupported_reply=_build_vision_unsupported_reply(),
         )
-        agent_data = _load_json_object(first_content)
-        if agent_data is None:
-            debug_log(
-                "AgentRuntime",
-                "模型返回非 JSON，按普通回复解析",
-                {"turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000)},
-            )
-            return AgentResult(reply=parse_chat_reply(first_content))
 
-        tool_calls = _parse_tool_calls(agent_data.get("tool_calls"))
-        debug_log(
-            "AgentRuntime",
-            "工具规划解析完成",
-            {
-                "has_reply": isinstance(agent_data.get("reply"), dict),
-                "tool_calls": tool_calls,
-            },
-        )
-        if not tool_calls:
-            debug_log(
-                "AgentRuntime",
-                "无需工具调用，直接返回模型回复",
-                {"turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000)},
-            )
-            return AgentResult(reply=_parse_agent_reply(agent_data, first_content))
-
+    def _run_tool_loop(
+        self,
+        messages: list[ChatMessage],
+        *,
+        allow_screen_observation: bool,
+        turn_started_at: float,
+        planning_extra_instructions: str = "",
+        initial_actions: list[AgentAction] | None = None,
+        vision_unsupported_reply: ChatReply | None = None,
+    ) -> AgentResult:
+        """执行受限 Agent 循环：规划工具、执行、回填结果，并允许继续规划。"""
+        working_messages: list[ChatMessage] = [*messages]
         execution_results: list[ToolExecutionResult] = []
-        pending_actions: list[PendingToolAction] = []
-        tools_started_at = time.perf_counter()
-        for call in tool_calls[:MAX_TOOL_CALLS_PER_TURN]:
-            debug_log("AgentRuntime", "准备工具调用", call)
-            prepared = self.tools.prepare_or_execute(
-                call["name"],
-                call["arguments"],
-                call.get("reason", ""),
+        emitted_actions: list[AgentAction] = [*(initial_actions or [])]
+        total_tool_calls = 0
+        for step_index in range(MAX_AGENT_STEPS_PER_TURN):
+            try:
+                planning_started_at = time.perf_counter()
+                model_content = self.api_client.complete_raw(
+                    self._build_tool_planning_prompt(
+                        allow_screen_observation=allow_screen_observation,
+                        step_index=step_index,
+                        remaining_steps=MAX_AGENT_STEPS_PER_TURN - step_index - 1,
+                        extra_instructions=planning_extra_instructions,
+                    ),
+                    working_messages,
+                    temperature=0.8,
+                )
+            except ApiRequestError as exc:
+                if messages_contain_image(working_messages) and is_vision_unsupported_error(exc):
+                    debug_log("AgentRuntime", "视觉输入不受支持，返回兜底回复", {"error": str(exc)})
+                    return AgentResult(
+                        reply=vision_unsupported_reply or _build_vision_unsupported_reply(),
+                        actions=emitted_actions,
+                    )
+                raise
+            debug_log(
+                "AgentRuntime",
+                "工具规划模型返回",
+                {
+                    "step_index": step_index,
+                    "content": model_content,
+                    "planning_elapsed_ms": int((time.perf_counter() - planning_started_at) * 1000),
+                },
             )
-            if isinstance(prepared, PendingToolAction):
-                debug_log("AgentRuntime", "工具调用等待用户确认", prepared.to_dict())
-                pending_actions.append(prepared)
-            else:
+            agent_data = _load_json_object(model_content)
+            if agent_data is None:
+                debug_log(
+                    "AgentRuntime",
+                    "模型返回非 JSON，按普通回复解析",
+                    {
+                        "step_index": step_index,
+                        "turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000),
+                    },
+                )
+                return AgentResult(
+                    reply=parse_chat_reply(model_content),
+                    actions=emitted_actions,
+                    memory_updates=_extract_memory_updates(execution_results),
+                )
+
+            tool_calls = _parse_tool_calls(agent_data.get("tool_calls"))
+            debug_log(
+                "AgentRuntime",
+                "工具规划解析完成",
+                {
+                    "step_index": step_index,
+                    "has_reply": isinstance(agent_data.get("reply"), dict),
+                    "tool_calls": tool_calls,
+                    "total_tool_calls": total_tool_calls,
+                },
+            )
+            if not tool_calls:
+                debug_log(
+                    "AgentRuntime",
+                    "多步循环完成，返回模型回复",
+                    {
+                        "step_index": step_index,
+                        "tool_result_count": len(execution_results),
+                        "turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000),
+                    },
+                )
+                return AgentResult(
+                    reply=_parse_agent_reply(agent_data, model_content),
+                    actions=emitted_actions,
+                    memory_updates=_extract_memory_updates(execution_results),
+                )
+
+            step_results: list[ToolExecutionResult] = []
+            pending_actions: list[PendingToolAction] = []
+            tools_started_at = time.perf_counter()
+            allowed_calls = min(
+                len(tool_calls),
+                MAX_TOOL_CALLS_PER_STEP,
+                max(0, MAX_TOOL_CALLS_PER_TURN - total_tool_calls),
+            )
+            for call in tool_calls[:allowed_calls]:
+                total_tool_calls += 1
+                debug_log("AgentRuntime", "准备工具调用", {"step_index": step_index, **call})
+                prepared = self.tools.prepare_or_execute(
+                    call["name"],
+                    call["arguments"],
+                    call.get("reason", ""),
+                )
+                if isinstance(prepared, PendingToolAction):
+                    debug_log("AgentRuntime", "工具调用等待用户确认", prepared.to_dict())
+                    pending_actions.append(prepared)
+                    continue
+
                 if _is_screen_observation_request(prepared):
                     if allow_screen_observation:
+                        screen_action = AgentAction(
+                            type=SCREEN_OBSERVATION_REQUEST_ACTION,
+                            payload={"reason": call.get("reason", "")},
+                        )
                         debug_log(
                             "AgentRuntime",
                             "请求屏幕观察 follow-up",
                             {
+                                "step_index": step_index,
                                 "reason": call.get("reason", ""),
                                 "turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000),
                             },
                         )
                         return AgentResult(
                             reply=_build_screen_observation_request_reply(),
-                            actions=[
-                                AgentAction(
-                                    type=SCREEN_OBSERVATION_REQUEST_ACTION,
-                                    payload={"reason": call.get("reason", "")},
-                                )
-                            ],
+                            actions=[*emitted_actions, screen_action],
+                            memory_updates=_extract_memory_updates(execution_results),
                         )
-                    execution_results.append(
-                        ToolExecutionResult(
-                            tool_name=OBSERVE_SCREEN_TOOL_NAME,
-                            success=False,
-                            content="",
-                            error=SCREEN_OBSERVATION_DISABLED_ERROR,
-                        )
+                    prepared = ToolExecutionResult(
+                        tool_name=OBSERVE_SCREEN_TOOL_NAME,
+                        success=False,
+                        content="",
+                        error=SCREEN_OBSERVATION_DISABLED_ERROR,
                     )
-                    continue
+
                 debug_log("AgentRuntime", "工具调用完成", _redact_tool_result_for_model(prepared))
+                step_results.append(prepared)
                 execution_results.append(prepared)
-        if len(tool_calls) > MAX_TOOL_CALLS_PER_TURN:
-            debug_log(
-                "AgentRuntime",
-                "工具调用数量超过上限",
-                {
-                    "requested": len(tool_calls),
-                    "limit": MAX_TOOL_CALLS_PER_TURN,
-                },
-            )
-            execution_results.append(
-                ToolExecutionResult(
+                emitted_actions.append(
+                    AgentAction(
+                        type="tool_call",
+                        payload=_redact_tool_result_for_model(prepared),
+                    )
+                )
+
+            skipped_calls = len(tool_calls) - allowed_calls
+            if skipped_calls > 0:
+                limit_error = (
+                    f"本步骤最多执行 {MAX_TOOL_CALLS_PER_STEP} 个工具调用，"
+                    f"整轮最多执行 {MAX_TOOL_CALLS_PER_TURN} 个工具调用，"
+                    f"已跳过 {skipped_calls} 个后续调用。"
+                )
+                limit_result = ToolExecutionResult(
                     tool_name="runtime",
                     success=False,
                     content="",
-                    error=f"单轮最多执行 {MAX_TOOL_CALLS_PER_TURN} 个工具调用，后续调用已跳过。",
+                    error=limit_error,
                 )
-            )
-
-        if pending_actions:
-            debug_log(
-                "AgentRuntime",
-                "返回待确认动作",
-                {
-                    "pending_actions": [action.to_dict() for action in pending_actions],
-                    "tools_elapsed_ms": int((time.perf_counter() - tools_started_at) * 1000),
-                    "turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000),
-                },
-            )
-            return AgentResult(
-                reply=_build_pending_action_reply(pending_actions),
-                actions=[
+                debug_log(
+                    "AgentRuntime",
+                    "工具调用数量超过上限",
+                    {
+                        "step_index": step_index,
+                        "requested": len(tool_calls),
+                        "allowed": allowed_calls,
+                        "total_tool_calls": total_tool_calls,
+                        "step_limit": MAX_TOOL_CALLS_PER_STEP,
+                        "turn_limit": MAX_TOOL_CALLS_PER_TURN,
+                    },
+                )
+                step_results.append(limit_result)
+                execution_results.append(limit_result)
+                emitted_actions.append(
                     AgentAction(
-                        type="pending_action",
-                        payload=action.to_dict(),
+                        type="tool_call",
+                        payload=_redact_tool_result_for_model(limit_result),
                     )
-                    for action in pending_actions
-                ],
-                memory_updates=_extract_memory_updates(execution_results),
+                )
+
+            if pending_actions:
+                debug_log(
+                    "AgentRuntime",
+                    "返回待确认动作",
+                    {
+                        "step_index": step_index,
+                        "pending_actions": [action.to_dict() for action in pending_actions],
+                        "tools_elapsed_ms": int((time.perf_counter() - tools_started_at) * 1000),
+                        "turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000),
+                    },
+                )
+                return AgentResult(
+                    reply=_build_pending_action_reply(pending_actions),
+                    actions=[
+                        *emitted_actions,
+                        *[
+                            AgentAction(
+                                type="pending_action",
+                                payload=action.to_dict(),
+                            )
+                            for action in pending_actions
+                        ],
+                    ],
+                    memory_updates=_extract_memory_updates(execution_results),
+                )
+
+            if not step_results:
+                break
+
+            working_messages.extend(
+                [
+                    {"role": "assistant", "content": model_content},
+                    _build_tool_results_message(
+                        step_results,
+                        include_images=self.model_vision_enabled,
+                    ),
+                ]
             )
+            if total_tool_calls >= MAX_TOOL_CALLS_PER_TURN:
+                break
 
         try:
             final_started_at = time.perf_counter()
             final_reply = self.api_client.chat(
                 self._build_final_reply_prompt(),
-                [
-                    *messages,
-                    {"role": "assistant", "content": first_content},
-                    _build_tool_results_message(
-                        execution_results,
-                        include_images=self.model_vision_enabled,
-                    ),
-                ],
+                working_messages,
                 self.reply_tones,
                 self.reply_portraits,
             )
@@ -232,20 +325,13 @@ class AgentRuntime:
             {
                 "segments": len(final_reply.segments),
                 "actions": [_redact_tool_result_for_model(result) for result in execution_results],
-                "tools_elapsed_ms": int((time.perf_counter() - tools_started_at) * 1000),
                 "final_reply_elapsed_ms": int((time.perf_counter() - final_started_at) * 1000),
                 "turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000),
             },
         )
         return AgentResult(
             reply=final_reply,
-            actions=[
-                AgentAction(
-                    type="tool_call",
-                    payload=_redact_tool_result_for_model(result),
-                )
-                for result in execution_results
-            ],
+            actions=emitted_actions,
             memory_updates=_extract_memory_updates(execution_results),
         )
 
@@ -318,6 +404,23 @@ class AgentRuntime:
 
         debug_log("AgentRuntime", "处理主动事件", {"event": {"type": event.type, "payload": event.payload}})
         event_messages = _build_event_messages(event)
+        event_action = AgentAction(
+            type="event",
+            payload={
+                "event_type": event.type,
+                "event_payload": event.payload,
+            },
+        )
+        if event.type == "proactive_check":
+            return self._run_tool_loop(
+                event_messages,
+                allow_screen_observation=False,
+                turn_started_at=time.perf_counter(),
+                planning_extra_instructions=_build_proactive_tool_loop_rules(),
+                initial_actions=[event_action],
+                vision_unsupported_reply=_build_proactive_vision_unsupported_reply(),
+            )
+
         try:
             reply = self.api_client.chat(
                 self._build_event_reply_prompt(event.type),
@@ -332,18 +435,16 @@ class AgentRuntime:
             raise
         return AgentResult(
             reply=reply,
-            actions=[
-                AgentAction(
-                    type="event",
-                    payload={
-                        "event_type": event.type,
-                        "event_payload": event.payload,
-                    },
-                )
-            ],
+            actions=[event_action],
         )
 
-    def _build_tool_planning_prompt(self, allow_screen_observation: bool = False) -> str:
+    def _build_tool_planning_prompt(
+        self,
+        allow_screen_observation: bool = False,
+        step_index: int = 0,
+        remaining_steps: int = MAX_AGENT_STEPS_PER_TURN - 1,
+        extra_instructions: str = "",
+    ) -> str:
         allowed_capabilities = {SCREEN_OBSERVATION_CAPABILITY} if allow_screen_observation else set()
         tools = self.tools.describe_tools(allowed_capabilities=allowed_capabilities)
         tool_descriptions = json.dumps(
@@ -372,6 +473,12 @@ class AgentRuntime:
 
 当前本地时间：
 {current_time}
+
+当前 Agent 循环：
+- 这是第 {step_index + 1} 步，之后最多还可以继续 {remaining_steps} 步。
+- 你可以根据已有工具结果继续请求下一批工具；信息足够或已经完成时，tool_calls 必须为空，并在 reply 中给最终答复。
+- 每步最多请求 {MAX_TOOL_CALLS_PER_STEP} 个工具，整轮最多 {MAX_TOOL_CALLS_PER_TURN} 个工具；不要为了凑数量而调用工具。
+- 不要重复调用刚失败且参数相同的工具；如果受限、需要确认或信息不足，请停止循环并说明当前状态。
 
 可用工具：
 {tool_descriptions}
@@ -406,6 +513,7 @@ class AgentRuntime:
 - 需要读取网页内容时，优先使用 browser_get_content；需要打开网页时使用 browser_open_url。
 - 需要网页交互时，只能基于当前页面真实内容选择 browser_scroll 或 browser_click，不要臆造 selector 或页面内容。
 {screen_observation_instruction}
+{extra_instructions.strip()}
 - 用户说“几分钟后/几秒后/一会儿后”等相对提醒时，add_reminder 必须使用 delay_minutes 或 delay_seconds，不要自己换算 trigger_at。
 - 只有用户给出明确日期或钟点时，add_reminder 才使用 trigger_at。
 - 不要静默写入长期记忆；只有用户明确要求记住时，才使用 propose_memory_update。
@@ -425,28 +533,40 @@ class AgentRuntime:
         tones = "、".join(tone for tone in self.reply_tones if tone.strip()) or "中性"
         portraits = "、".join(portrait for portrait in self.reply_portraits if portrait.strip()) or "站立待机"
         proactive_rules = ""
+        example_tone = "提醒"
         if event_type == "proactive_check":
+            example_tone = "中性"
             proactive_rules = """
-- 这是低打扰主动关怀，不是用户主动提问；如果没有明确问题，只说 1-2 段即可。
-- 如果屏幕信息显示用户在专注工作，温和提醒短休息、喝水或伸展。
-- 如果屏幕信息显示错误、报错、搜索故障或明显卡住，可以询问是否要帮忙看看。
-- 如果像是在娱乐，不要批评，只轻轻提醒时间和休息。
-- 如果屏幕内容无法判断，不要臆造，只做通用关怀。
+- 这是低打扰主动搭话，不是用户主动提问；如果没有明确问题，只说 1-2 段即可。
+- 主动搭话不是关怀模板，也不是固定的护眼提醒。先判断事件里是否附加了 screen_context.image_attached；如果有，优先理解屏幕画面本身，再决定要聊什么。
+- seconds_since_pet_interaction 只表示用户一段时间没有和桌宠交互，不代表用户离开、电脑没操作、屏幕没变化或没有活动。
+- 不要根据 seconds_since_pet_interaction 说“没动静”“去哪了”“消失了”“是不是离开了”等判断；它只能作为降低打扰频率的背景信息。
+- 如果能看出屏幕内容，请围绕用户正在看的具体内容自然接话：可以点出界面类型、正在处理的任务、明显的报错/搜索/文档/代码/设置/聊天/视频/音乐/角色内容，并提出一个具体、轻量的问题或评论。
+- 找到屏幕话题时，不要在结尾追加“看远处、深呼吸、休息、喝水、别逞强、别硬扛”等通用关怀句；这些会显得机械。
+- 只有在没有可聊内容、屏幕无法判断、或画面明确显示用户疲惫/超长时间工作时，才使用休息、喝水或伸展类提醒。
+- 如果看到代码、终端、报错、搜索故障或明显卡住，优先问一个针对当前问题的具体问题，例如“这段是在调哪个异常？”“要不要我帮你把日志里的关键线索拎出来？”。
+- 如果看到文档、笔记、写作或资料页，可以问是否卡在某段、要不要帮忙梳理要点、润色或继续推进。
+- 如果看到设置页、表单、工具界面或对话框，可以问是否需要确认当前选项、排查某个状态或比较可选项。
+- 如果看到视频、音乐、游戏、图片、角色或二次元女孩子，可以自然评价内容；若符合夜乃桜的人格，可以轻微吃醋、嘴硬、装作不在意或问“你喜欢这种类型吗”，但不要责备用户。
+- 如果像是在娱乐，不要批评；优先找画面里的内容聊天，而不是提醒时间。
+- 如果屏幕内容无法判断，或没有附加屏幕图片，不要臆造，只做一句很轻的普通问候。
+- 提问要具体，避免只说“要不要帮忙”这种泛泛关怀；但不要编造屏幕上看不清的文字、文件名、错误码或用户意图。
 - 只能给建议或询问，不要声明自己已经执行任何工具、点击、打开网页或改变外部状态。
 """.rstrip()
         return f"""
 {self.system_prompt.strip()}
 
-你正在处理 Sakura 桌宠的主动事件。请用角色语气自然提醒用户。
+你正在处理 Sakura 桌宠的主动事件。请用角色语气自然搭话、提问或提醒用户。
 你必须只返回 JSON，不要使用 Markdown 代码块，不要输出额外解释。
 JSON 格式如下：
-{{"segments":[{{"ja":"日文原文","zh":"中文译文","tone":"提醒","portrait":"伸手命令"}}]}}
+{{"segments":[{{"ja":"日文原文","zh":"中文译文","tone":"{example_tone}","portrait":"站立待机"}}]}}
 
 要求：
 - tone 只能从这些类别中选择：{tones}。
 - portrait 只能从这些类别中选择：{portraits}。
 - ja 中只写夜乃桜要说出口的日文原文，必须是日语，适合直接交给日语 TTS 朗读。
 - zh 中只写 ja 对应的自然中文译文，必须是中文。
+- tone 和 portrait 要根据内容选择；主动搭话时不要固定使用“提醒”语气。
 - 不要提及内部事件类型、JSON 或工具实现。
 {proactive_rules}
 """.strip()
@@ -816,13 +936,15 @@ def _build_event_messages(event: AgentEvent) -> list[ChatMessage]:
 
 
 def _format_event_for_model(event: AgentEvent) -> str:
-    return (
-        "主动事件如下，请生成要直接说给用户听的提醒：\n"
-        + json.dumps(
-            _redact_event_for_model(event),
-            ensure_ascii=False,
-            indent=2,
-        )
+    instruction = (
+        "主动事件如下，请基于屏幕或事件内容生成要直接说给用户听的自然搭话："
+        if event.type == "proactive_check"
+        else "主动事件如下，请生成要直接说给用户听的提醒："
+    )
+    return instruction + "\n" + json.dumps(
+        _redact_event_for_model(event),
+        ensure_ascii=False,
+        indent=2,
     )
 
 
@@ -856,6 +978,27 @@ def _build_proactive_vision_unsupported_reply() -> ChatReply:
             ensure_ascii=False,
         )
     )
+
+
+def _build_proactive_tool_loop_rules() -> str:
+    return """
+- 这是主动检查事件，不是用户直接发来的请求；整体保持低打扰。
+- 这是低打扰主动搭话，不是用户主动提问；如果没有明确问题，只说 1-2 段即可。
+- 请用角色语气自然搭话、提问或提醒用户。
+- 主动搭话不是关怀模板，也不是固定的护眼提醒。
+- seconds_since_pet_interaction 只表示用户一段时间没有和桌宠交互，不代表用户离开、电脑没操作、屏幕没变化或没有活动。
+- 不要根据 seconds_since_pet_interaction 说“没动静”“去哪了”“消失了”“是不是离开了”等判断；它只能作为降低打扰频率的背景信息。
+- 如果能看出屏幕内容，请围绕用户正在看的具体内容自然接话，并提出一个具体、轻量的问题或评论。
+- 如果事件里附加了 screen_context.image_attached，优先理解屏幕画面本身，再决定要聊什么。
+- 找到屏幕话题时，不要在结尾追加“看远处、深呼吸、休息、喝水、别逞强、别硬扛”等通用关怀句；这些会显得机械。
+- 如果看到视频、音乐、游戏、图片、角色或二次元女孩子，可以自然评价内容；若符合夜乃桜的人格，可以轻微吃醋、嘴硬、装作不在意或问“你喜欢这种类型吗”，但不要责备用户。
+- tone 和 portrait 要根据内容选择；主动搭话时不要固定使用“提醒”语气。
+- 你可以使用只读或低风险工具补充上下文，例如读取当前时间、搜索已确认记忆、读取受控浏览器当前内容或状态。
+- 只有发现明确、有价值的后续线索时才继续下一步；不要为了显得主动而循环调用工具。
+- 不要主动执行会改变外部状态的工具，除非工具需要确认且你只是发起确认请求。
+- 如果事件已经附加 screen_context.image_attached，优先基于画面判断；不要再请求 observe_screen。
+- 最终回复只说给用户听的自然搭话、提问或轻提醒，不要提及内部事件、工具循环或工具协议。
+""".strip()
 
 
 def _extract_memory_updates(results: list[ToolExecutionResult]) -> list[MemoryUpdate]:
