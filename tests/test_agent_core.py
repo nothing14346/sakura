@@ -9,6 +9,9 @@ import pytest
 from app.agent.actions import PendingToolAction
 from app.agent.builtin_tools import create_builtin_tool_registry
 from app.agent.memory import MemoryStore
+from app.agent.mcp.bridge import MCPToolSpec
+from app.agent.mcp.config import load_mcp_config
+from app.agent.mcp.provider import MCPToolProvider, register_mcp_tools_from_config
 from app.agent.reminders import ReminderStore
 from app.agent.runtime import AgentRuntime, _build_tool_results_message
 from app.agent.runtime import _redact_tool_result_for_model
@@ -227,6 +230,177 @@ def test_tool_registry_filters_tools_by_capability() -> None:
 
     assert OBSERVE_SCREEN_TOOL_NAME not in visible_without_capability
     assert OBSERVE_SCREEN_TOOL_NAME in visible_with_capability
+
+
+def test_mcp_missing_config_does_not_register_tools() -> None:
+    root = _runtime_root_path("mcp_missing")
+    registry = ToolRegistry()
+
+    provider = register_mcp_tools_from_config(root, registry)
+
+    assert provider is None
+    assert registry.describe_tools() == []
+
+
+def test_mcp_disabled_config_does_not_register_tools() -> None:
+    root = _runtime_root_path("mcp_disabled")
+    config_dir = root / "data" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "mcp.yaml").write_text(
+        """
+enabled: false
+servers:
+  demo:
+    transport: stdio
+    command: python
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = ToolRegistry()
+    provider = register_mcp_tools_from_config(
+        root,
+        registry,
+        bridge_factory=_FakeMCPBridge,
+    )
+
+    assert provider is None
+    assert registry.describe_tools() == []
+
+
+def test_mcp_empty_servers_do_not_register_tools() -> None:
+    root = _runtime_root_path("mcp_empty")
+    config_dir = root / "data" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "mcp.yaml").write_text("enabled: true\nservers: {}\n", encoding="utf-8")
+
+    registry = ToolRegistry()
+    provider = register_mcp_tools_from_config(root, registry)
+
+    assert provider is None
+    assert registry.describe_tools() == []
+
+
+def test_mcp_invalid_config_does_not_break_registry() -> None:
+    root = _runtime_root_path("mcp_invalid")
+    config_dir = root / "data" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "mcp.yaml").write_text("enabled: [not_bool]\n", encoding="utf-8")
+    registry = ToolRegistry()
+
+    provider = register_mcp_tools_from_config(root, registry)
+
+    assert provider is None
+    assert registry.describe_tools() == []
+
+
+def test_mcp_config_parses_prefix_and_low_risk() -> None:
+    config_path = _runtime_root_path("mcp_parse") / "mcp.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        """
+enabled: true
+default_call_timeout: 12
+servers:
+  demo:
+    transport: sse
+    url: http://127.0.0.1:8000/sse
+    name_prefix: demo_
+    risk: low
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_mcp_config(config_path)
+
+    assert config.enabled
+    assert config.default_call_timeout == 12
+    assert config.servers[0].effective_name_prefix() == "demo_"
+    assert config.servers[0].risk == "low"
+    assert not config.servers[0].effective_requires_confirmation()
+
+
+def test_mcp_provider_registers_prefixed_tools_and_schema() -> None:
+    root = _runtime_root_path("mcp_register")
+    config_dir = root / "data" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "mcp.yaml").write_text(
+        """
+enabled: true
+servers:
+  demo:
+    transport: stdio
+    command: python
+    name_prefix: demo_
+""".strip(),
+        encoding="utf-8",
+    )
+    registry = ToolRegistry()
+
+    provider = register_mcp_tools_from_config(
+        root,
+        registry,
+        bridge_factory=_FakeMCPBridge,
+    )
+
+    assert provider is not None
+    tool = registry.get("demo_echo")
+    assert tool is not None
+    assert tool.parameters["properties"]["message"]["type"] == "string"
+    assert tool.group == "mcp"
+    assert tool.risk == "medium"
+    assert tool.requires_confirmation
+    provider.close()
+
+
+def test_mcp_tool_call_uses_external_name() -> None:
+    root = _runtime_root_path("mcp_call")
+    registry = ToolRegistry()
+    provider = MCPToolProvider(
+        load_mcp_config(_write_mcp_config(root, "name_prefix: demo_\nrisk: low")),
+        bridge_factory=_FakeMCPBridge,
+    )
+    provider.register_tools(registry)
+
+    result = registry.execute("demo_echo", {"message": "hello"})
+
+    assert result.success
+    assert result.content["server_tool_name"] == "echo"
+    assert result.content["arguments"] == {"message": "hello"}
+    provider.close()
+
+
+def test_mcp_tool_call_exception_returns_failed_result() -> None:
+    root = _runtime_root_path("mcp_fail")
+    registry = ToolRegistry()
+    provider = MCPToolProvider(
+        load_mcp_config(_write_mcp_config(root, "name_prefix: fail_\nrisk: low")),
+        bridge_factory=_FailingMCPBridge,
+    )
+    provider.register_tools(registry)
+
+    result = registry.execute("fail_echo", {"message": "hello"})
+
+    assert not result.success
+    assert "MCP 调用失败" in result.error
+    provider.close()
+
+
+def test_mcp_high_risk_still_requires_confirmation_with_free_access() -> None:
+    root = _runtime_root_path("mcp_high_risk")
+    registry = ToolRegistry()
+    provider = MCPToolProvider(
+        load_mcp_config(_write_mcp_config(root, "name_prefix: dangerous_\nrisk: high")),
+        bridge_factory=_FakeMCPBridge,
+    )
+    provider.register_tools(registry)
+    registry.set_free_access_enabled(True)
+
+    result = registry.prepare_or_execute("dangerous_echo", {"message": "hello"})
+
+    assert isinstance(result, PendingToolAction)
+    assert result.tool_name == "dangerous_echo"
+    provider.close()
 
 
 def test_builtin_registry_includes_browser_tools() -> None:
@@ -577,8 +751,11 @@ def test_plain_text_messages_do_not_contain_image() -> None:
 
 
 def _runtime_json_path(name: str) -> Path:
-    root = Path(__file__).resolve().parents[1] / "__pycache__" / "test_runtime" / uuid.uuid4().hex
-    return root / f"{name}.json"
+    return _runtime_root_path(name) / f"{name}.json"
+
+
+def _runtime_root_path(name: str) -> Path:
+    return Path(__file__).resolve().parents[1] / "__pycache__" / "test_runtime" / name / uuid.uuid4().hex
 
 
 class _FakeBrowserExecutor:
@@ -623,3 +800,59 @@ class _FakeBrowserExecutor:
                 "loading": False,
             }
         raise ValueError(name)
+
+
+def _write_mcp_config(root: Path, server_body: str) -> Path:
+    config_path = root / "mcp.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    indented_body = "\n".join(f"    {line}" if line else "" for line in server_body.splitlines())
+    config_path.write_text(
+        f"""
+enabled: true
+servers:
+  demo:
+    transport: stdio
+    command: python
+{indented_body}
+""".strip(),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+class _FakeMCPBridge:
+    def __init__(self, _server_config, _default_call_timeout) -> None:  # type: ignore[no-untyped-def]
+        self.closed = False
+
+    def connect(self) -> None:
+        return None
+
+    def list_tools(self) -> list[MCPToolSpec]:
+        return [
+            MCPToolSpec(
+                name="echo",
+                description="回显消息。",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"},
+                    },
+                    "required": ["message"],
+                },
+            )
+        ]
+
+    def call_tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+        return {
+            "server_tool_name": name,
+            "arguments": arguments,
+        }
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FailingMCPBridge(_FakeMCPBridge):
+    def call_tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+        _ = name, arguments
+        raise RuntimeError("MCP 调用失败")

@@ -114,14 +114,43 @@ def test_tts_service_probe_reports_unavailable_service(monkeypatch) -> None:  # 
     provider._service_checked = False
     messages: list[str] = []
 
-    def fake_urlopen(*_args: object, **_kwargs: object) -> object:
-        raise urllib.error.URLError("connection refused")
+    def fake_create_connection(*_args: object, **_kwargs: object) -> object:
+        raise OSError("connection refused")
 
-    monkeypatch.setattr("app.tts.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("app.tts.socket.create_connection", fake_create_connection)
 
     assert not GPTSoVITSTTSProvider._ensure_service_available(provider, messages.append)
     assert "服务不可用" in messages[0]
     assert "http://127.0.0.1:9880/tts" in messages[0]
+
+
+def test_tts_service_probe_uses_tcp_connection_without_get(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    provider = types.SimpleNamespace()
+    provider.settings = _minimal_tts_settings()
+    provider._service_checked = False
+    messages: list[str] = []
+    calls: list[tuple[tuple[str, int], int]] = []
+
+    class FakeConnection:
+        def __enter__(self) -> "FakeConnection":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def fake_create_connection(address: tuple[str, int], timeout: int) -> FakeConnection:
+        calls.append((address, timeout))
+        return FakeConnection()
+
+    def fail_urlopen(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("服务探测不应请求 /tts")
+
+    monkeypatch.setattr("app.tts.socket.create_connection", fake_create_connection)
+    monkeypatch.setattr("app.tts.urllib.request.urlopen", fail_urlopen)
+
+    assert GPTSoVITSTTSProvider._ensure_service_available(provider, messages.append)
+    assert messages == []
+    assert calls == [(("127.0.0.1", 9880), 1)]
 
 
 def test_tts_weight_switch_error_includes_endpoint_and_path(monkeypatch) -> None:  # type: ignore[no-untyped-def]

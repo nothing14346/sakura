@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.chat_reply import ChatReply, parse_chat_reply
+from app.debug_log import debug_log, summarize_messages
 from app.env_config import load_env_file, save_env_values
 
 
@@ -167,7 +168,17 @@ class OpenAICompatibleClient:
             temperature=0.8,
         )
 
-        return parse_chat_reply(content)
+        reply = parse_chat_reply(content)
+        debug_log(
+            "API",
+            "聊天回复解析完成",
+            {
+                "segments": len(reply.segments),
+                "tone": reply.tone,
+                "reply": reply.text,
+            },
+        )
+        return reply
 
     def complete_raw(
         self,
@@ -186,6 +197,20 @@ class OpenAICompatibleClient:
             temperature=temperature,
             chat_params=chat_params,
         )
+        debug_log(
+            "API",
+            "准备发送聊天补全请求",
+            {
+                "base_url": self.settings.base_url,
+                "model": self.settings.model,
+                "timeout_seconds": self.settings.timeout_seconds,
+                "temperature": temperature,
+                "message_count": len(payload["messages"]),
+                "has_image": messages_contain_image(payload["messages"]),
+                "messages": summarize_messages(payload["messages"]),
+                "chat_params": _filter_supported_chat_params(chat_params),
+            },
+        )
         data = self._post_chat_completions(payload)
 
         try:
@@ -193,7 +218,9 @@ class OpenAICompatibleClient:
         except (KeyError, IndexError, TypeError) as exc:
             raise ApiRequestError(f"API 返回格式无法解析：{json.dumps(data, ensure_ascii=False)}") from exc
 
-        return str(content).strip()
+        result = str(content).strip()
+        debug_log("API", "模型原始文本返回", {"content": result})
+        return result
 
     def _ensure_chat_config(self, api_key_message: str) -> None:
         if not self.settings.api_key:
@@ -206,8 +233,9 @@ class OpenAICompatibleClient:
     def _post_chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
         """调用 OpenAI 兼容的 chat/completions 接口并返回 JSON 数据。"""
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        url = f"{self.settings.base_url}/chat/completions"
         request = urllib.request.Request(
-            url=f"{self.settings.base_url}/chat/completions",
+            url=url,
             data=body,
             method="POST",
             headers={
@@ -216,6 +244,15 @@ class OpenAICompatibleClient:
             },
         )
 
+        debug_log(
+            "API",
+            "HTTP 请求体已构建",
+            {
+                "url": url,
+                "bytes": len(body),
+                "payload": payload,
+            },
+        )
         response_body = self._send_with_retries(request)
 
         try:
@@ -228,31 +265,89 @@ class OpenAICompatibleClient:
     def _send_with_retries(self, request: urllib.request.Request) -> str:
         last_error: BaseException | None = None
         for attempt in range(1, MAX_API_RETRY_ATTEMPTS + 1):
+            started_at = time.perf_counter()
             try:
                 with urllib.request.urlopen(
                     request,
                     timeout=self.settings.timeout_seconds,
                 ) as response:
-                    return response.read().decode("utf-8")
+                    response_body = response.read().decode("utf-8")
+                    debug_log(
+                        "API",
+                        "HTTP 请求成功",
+                        {
+                            "attempt": attempt,
+                            "status": getattr(response, "status", None),
+                            "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                            "response_body": response_body,
+                        },
+                    )
+                    return response_body
             except urllib.error.HTTPError as exc:
                 error_body = exc.read().decode("utf-8", errors="replace")
+                debug_log(
+                    "API",
+                    "HTTP 请求失败",
+                    {
+                        "attempt": attempt,
+                        "status": exc.code,
+                        "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                        "error_body": error_body,
+                    },
+                )
                 if exc.code not in {429, 500, 502, 503, 504} or attempt == MAX_API_RETRY_ATTEMPTS:
                     raise ApiRequestError(f"API HTTP {exc.code}: {error_body}") from exc
                 last_error = exc
             except urllib.error.URLError as exc:
+                debug_log(
+                    "API",
+                    "URL 请求失败",
+                    {
+                        "attempt": attempt,
+                        "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                        "reason": str(exc.reason),
+                    },
+                )
                 if attempt == MAX_API_RETRY_ATTEMPTS:
                     raise ApiRequestError(f"API 请求失败：{exc.reason}") from exc
                 last_error = exc
             except TimeoutError as exc:
+                debug_log(
+                    "API",
+                    "请求超时",
+                    {
+                        "attempt": attempt,
+                        "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                    },
+                )
                 if attempt == MAX_API_RETRY_ATTEMPTS:
                     raise ApiRequestError("API 请求超时。") from exc
                 last_error = exc
             except (ssl.SSLError, ConnectionError, http.client.RemoteDisconnected) as exc:
+                debug_log(
+                    "API",
+                    "连接中断",
+                    {
+                        "attempt": attempt,
+                        "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                        "error": str(exc),
+                    },
+                )
                 if attempt == MAX_API_RETRY_ATTEMPTS:
                     raise ApiRequestError(f"API 连接中断：{exc}") from exc
                 last_error = exc
 
             print(f"[API] 请求失败，准备重试 {attempt}/{MAX_API_RETRY_ATTEMPTS}：{last_error}")
+            debug_log(
+                "API",
+                "准备重试请求",
+                {
+                    "attempt": attempt,
+                    "max_attempts": MAX_API_RETRY_ATTEMPTS,
+                    "delay_seconds": API_RETRY_DELAY_SECONDS * attempt,
+                    "last_error": str(last_error),
+                },
+            )
             time.sleep(API_RETRY_DELAY_SECONDS * attempt)
 
         raise ApiRequestError("API 请求失败。")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from typing import Any
 
@@ -21,6 +22,7 @@ from app.api_client import (
     messages_contain_image,
 )
 from app.chat_reply import ChatReply, parse_chat_reply
+from app.debug_log import debug_log, summarize_messages
 
 
 MAX_TOOL_CALLS_PER_TURN = 3
@@ -55,8 +57,20 @@ class AgentRuntime:
         self.model_vision_enabled = enabled
 
     def handle_user_message(self, messages: list[ChatMessage]) -> AgentResult:
+        turn_started_at = time.perf_counter()
         allow_screen_observation = self.model_vision_enabled and not messages_contain_image(messages)
+        debug_log(
+            "AgentRuntime",
+            "开始处理用户消息",
+            {
+                "message_count": len(messages),
+                "allow_screen_observation": allow_screen_observation,
+                "model_vision_enabled": self.model_vision_enabled,
+                "messages": summarize_messages(messages),
+            },
+        )
         try:
+            planning_started_at = time.perf_counter()
             first_content = self.api_client.complete_raw(
                 self._build_tool_planning_prompt(allow_screen_observation=allow_screen_observation),
                 messages,
@@ -64,29 +78,67 @@ class AgentRuntime:
             )
         except ApiRequestError as exc:
             if messages_contain_image(messages) and is_vision_unsupported_error(exc):
+                debug_log("AgentRuntime", "视觉输入不受支持，返回兜底回复", {"error": str(exc)})
                 return AgentResult(reply=_build_vision_unsupported_reply())
             raise
+        debug_log(
+            "AgentRuntime",
+            "工具规划模型返回",
+            {
+                "content": first_content,
+                "planning_elapsed_ms": int((time.perf_counter() - planning_started_at) * 1000),
+            },
+        )
         agent_data = _load_json_object(first_content)
         if agent_data is None:
+            debug_log(
+                "AgentRuntime",
+                "模型返回非 JSON，按普通回复解析",
+                {"turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000)},
+            )
             return AgentResult(reply=parse_chat_reply(first_content))
 
         tool_calls = _parse_tool_calls(agent_data.get("tool_calls"))
+        debug_log(
+            "AgentRuntime",
+            "工具规划解析完成",
+            {
+                "has_reply": isinstance(agent_data.get("reply"), dict),
+                "tool_calls": tool_calls,
+            },
+        )
         if not tool_calls:
+            debug_log(
+                "AgentRuntime",
+                "无需工具调用，直接返回模型回复",
+                {"turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000)},
+            )
             return AgentResult(reply=_parse_agent_reply(agent_data, first_content))
 
         execution_results: list[ToolExecutionResult] = []
         pending_actions: list[PendingToolAction] = []
+        tools_started_at = time.perf_counter()
         for call in tool_calls[:MAX_TOOL_CALLS_PER_TURN]:
+            debug_log("AgentRuntime", "准备工具调用", call)
             prepared = self.tools.prepare_or_execute(
                 call["name"],
                 call["arguments"],
                 call.get("reason", ""),
             )
             if isinstance(prepared, PendingToolAction):
+                debug_log("AgentRuntime", "工具调用等待用户确认", prepared.to_dict())
                 pending_actions.append(prepared)
             else:
                 if _is_screen_observation_request(prepared):
                     if allow_screen_observation:
+                        debug_log(
+                            "AgentRuntime",
+                            "请求屏幕观察 follow-up",
+                            {
+                                "reason": call.get("reason", ""),
+                                "turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000),
+                            },
+                        )
                         return AgentResult(
                             reply=_build_screen_observation_request_reply(),
                             actions=[
@@ -105,8 +157,17 @@ class AgentRuntime:
                         )
                     )
                     continue
+                debug_log("AgentRuntime", "工具调用完成", _redact_tool_result_for_model(prepared))
                 execution_results.append(prepared)
         if len(tool_calls) > MAX_TOOL_CALLS_PER_TURN:
+            debug_log(
+                "AgentRuntime",
+                "工具调用数量超过上限",
+                {
+                    "requested": len(tool_calls),
+                    "limit": MAX_TOOL_CALLS_PER_TURN,
+                },
+            )
             execution_results.append(
                 ToolExecutionResult(
                     tool_name="runtime",
@@ -117,6 +178,15 @@ class AgentRuntime:
             )
 
         if pending_actions:
+            debug_log(
+                "AgentRuntime",
+                "返回待确认动作",
+                {
+                    "pending_actions": [action.to_dict() for action in pending_actions],
+                    "tools_elapsed_ms": int((time.perf_counter() - tools_started_at) * 1000),
+                    "turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000),
+                },
+            )
             return AgentResult(
                 reply=_build_pending_action_reply(pending_actions),
                 actions=[
@@ -130,6 +200,7 @@ class AgentRuntime:
             )
 
         try:
+            final_started_at = time.perf_counter()
             final_reply = self.api_client.chat(
                 self._build_final_reply_prompt(),
                 [
@@ -144,7 +215,19 @@ class AgentRuntime:
             )
         except Exception as exc:
             print(f"[AgentRuntime] 工具结果总结失败，使用本地兜底回复：{exc}")
+            debug_log("AgentRuntime", "工具结果总结失败，使用本地兜底回复", {"error": str(exc)})
             final_reply = _build_fallback_tool_reply(execution_results)
+        debug_log(
+            "AgentRuntime",
+            "最终回复生成完成",
+            {
+                "segments": len(final_reply.segments),
+                "actions": [_redact_tool_result_for_model(result) for result in execution_results],
+                "tools_elapsed_ms": int((time.perf_counter() - tools_started_at) * 1000),
+                "final_reply_elapsed_ms": int((time.perf_counter() - final_started_at) * 1000),
+                "turn_elapsed_ms": int((time.perf_counter() - turn_started_at) * 1000),
+            },
+        )
         return AgentResult(
             reply=final_reply,
             actions=[
@@ -158,6 +241,7 @@ class AgentRuntime:
         )
 
     def handle_confirmed_action(self, action: PendingToolAction) -> AgentResult:
+        debug_log("AgentRuntime", "执行已确认动作", action.to_dict())
         result = self.tools.execute(action.tool_name, action.arguments)
         try:
             reply = self.api_client.chat(
@@ -172,7 +256,16 @@ class AgentRuntime:
             )
         except Exception as exc:
             print(f"[AgentRuntime] 确认动作总结失败，使用本地兜底回复：{exc}")
+            debug_log("AgentRuntime", "确认动作总结失败，使用本地兜底回复", {"error": str(exc)})
             reply = _build_fallback_tool_reply([result])
+        debug_log(
+            "AgentRuntime",
+            "已确认动作处理完成",
+            {
+                "result": _redact_tool_result_for_model(result),
+                "segments": len(reply.segments),
+            },
+        )
         return AgentResult(
             reply=reply,
             actions=[
@@ -184,6 +277,7 @@ class AgentRuntime:
         )
 
     def handle_cancelled_action(self, action: PendingToolAction) -> AgentResult:
+        debug_log("AgentRuntime", "用户取消待确认动作", action.to_dict())
         return AgentResult(
             reply=parse_chat_reply(
                 json.dumps(
@@ -211,6 +305,7 @@ class AgentRuntime:
         if event.type != "reminder_due":
             return AgentResult(reply=parse_chat_reply("未対応のイベントだよ。"))
 
+        debug_log("AgentRuntime", "处理主动事件", {"event": {"type": event.type, "payload": event.payload}})
         reply = self.api_client.chat(
             self._build_event_reply_prompt(),
             [
