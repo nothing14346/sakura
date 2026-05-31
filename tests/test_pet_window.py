@@ -628,7 +628,7 @@ def test_progress_reply_displays_and_records_assistant_message() -> None:
     )
 
     assert window.messages[-1] == {"role": "assistant", "content": "調べるね。"}
-    assert history[-1] == ("assistant", "調べるね。", "我查一下。")
+    assert history[-1] == ("assistant", "調べるね。", "我查一下。", "中性", "")
     assert shown and shown[0][0].translation == "我查一下。"
 
 
@@ -662,10 +662,160 @@ def test_progress_reply_records_segments_as_separate_history_entries() -> None:
 
     assert window.messages[-1] == {"role": "assistant", "content": "一つ目。\n二つ目。"}
     assert history == [
-        ("assistant", "一つ目。", "第一段。"),
-        ("assistant", "二つ目。", "第二段。"),
+        ("assistant", "一つ目。", "第一段。", "中性", ""),
+        ("assistant", "二つ目。", "第二段。", "中性", ""),
     ]
     assert shown and len(shown[0]) == 2
+
+
+def test_assistant_reply_history_records_tone_and_portrait() -> None:
+    from app.chat_reply import ChatReply
+    from app.pet_window import PetWindow
+
+    class MinimalHistoryWindow:
+        _record_assistant_reply_history = PetWindow._record_assistant_reply_history
+
+    window = MinimalHistoryWindow()
+    history = []
+    window._record_history = lambda *args: history.append(args)
+
+    window._record_assistant_reply_history(
+        ChatReply(
+            [
+                ChatSegment(
+                    "どうしたの？",
+                    "困惑",
+                    "怎么了？",
+                    "张嘴疑问",
+                )
+            ]
+        )
+    )
+
+    assert history == [("assistant", "どうしたの？", "怎么了？", "困惑", "张嘴疑问")]
+
+
+def test_chat_history_store_round_trips_tone_and_portrait() -> None:
+    from app.chat_history import ChatHistoryStore
+
+    history_path = (
+        Path(__file__).resolve().parents[1]
+        / "__pycache__"
+        / "test_runtime"
+        / "chat_history_segments"
+        / uuid.uuid4().hex
+        / "history.jsonl"
+    )
+    store = ChatHistoryStore(history_path)
+
+    store.append("assistant", "どうしたの？", "怎么了？", "困惑", "张嘴疑问")
+
+    entries = store.load()
+    assert len(entries) == 1
+    assert entries[0].content == "どうしたの？"
+    assert entries[0].translation == "怎么了？"
+    assert entries[0].tone == "困惑"
+    assert entries[0].portrait == "张嘴疑问"
+
+
+def test_chat_history_store_loads_legacy_entries_without_tone_or_portrait() -> None:
+    from app.chat_history import ChatHistoryStore
+
+    history_path = (
+        Path(__file__).resolve().parents[1]
+        / "__pycache__"
+        / "test_runtime"
+        / "chat_history_legacy"
+        / uuid.uuid4().hex
+        / "history.jsonl"
+    )
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(
+        '{"created_at":"2026-06-01T10:00:00+08:00","role":"assistant",'
+        '"content":"古い履歴。","translation":"旧历史。"}\n',
+        encoding="utf-8",
+    )
+
+    entries = ChatHistoryStore(history_path).load()
+
+    assert len(entries) == 1
+    assert entries[0].content == "古い履歴。"
+    assert entries[0].translation == "旧历史。"
+    assert entries[0].tone == ""
+    assert entries[0].portrait == ""
+
+
+def test_reply_history_segments_load_from_persisted_history_entries() -> None:
+    from app.chat_history import ChatHistoryEntry
+    from app.pet_window import _reply_history_segments_from_entries
+
+    segments = _reply_history_segments_from_entries(
+        [
+            ChatHistoryEntry("2026-06-01T10:00:00+08:00", "user", "你好"),
+            ChatHistoryEntry(
+                "2026-06-01T10:00:01+08:00",
+                "assistant",
+                "古い履歴。",
+                "旧历史。",
+            ),
+            ChatHistoryEntry(
+                "2026-06-01T10:00:02+08:00",
+                "assistant",
+                "表情付き。",
+                "带表情。",
+                "困惑",
+                "张嘴疑问",
+            ),
+        ]
+    )
+
+    assert segments == [
+        ChatSegment("古い履歴。", translation="旧历史。"),
+        ChatSegment("表情付き。", "困惑", "带表情。", "张嘴疑问"),
+    ]
+
+
+def test_reply_history_reload_uses_history_store_entries() -> None:
+    from app.chat_history import ChatHistoryEntry
+    from app.pet_window import PetWindow
+
+    class FakeHistoryStore:
+        def load(self):  # type: ignore[no-untyped-def]
+            return [
+                ChatHistoryEntry(
+                    "2026-06-01T10:00:00+08:00",
+                    "assistant",
+                    "再起動後も戻れる。",
+                    "重启后也能回看。",
+                    "中性",
+                    "站立待机",
+                )
+            ]
+
+    class MinimalHistoryWindow:
+        _load_reply_history_from_store = PetWindow._load_reply_history_from_store
+        _normalized_reply_history_index = PetWindow._normalized_reply_history_index
+        _can_review_reply_history = PetWindow._can_review_reply_history
+        _update_reply_history_buttons = PetWindow._update_reply_history_buttons
+
+    window = MinimalHistoryWindow()
+    window.history_store = FakeHistoryStore()
+    window.reply_history_segments = []
+    window.reply_history_index = None
+    window.reply_history_review_active = True
+    window.reply_history_previous_button = _DummyButton()
+    window.reply_history_next_button = _DummyButton()
+    window.worker_thread = None
+    window.subtitle_controller = _DummySubtitleController()
+    window._log_interaction_stage = lambda *_args, **_kwargs: None
+
+    window._load_reply_history_from_store()
+
+    assert window.reply_history_segments == [
+        ChatSegment("再起動後も戻れる。", "中性", "重启后也能回看。", "站立待机")
+    ]
+    assert window.reply_history_index == 0
+    assert not window.reply_history_review_active
 
 
 def test_reply_history_buttons_review_segments_without_tts_or_history() -> None:

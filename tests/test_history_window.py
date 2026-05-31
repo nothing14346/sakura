@@ -116,3 +116,19 @@ def test_entry_view_model_uses_translation_only_for_chinese_assistant_subtitles(
 
     assert zh_view.content == "译文"
     assert ja_view.content == "原文"
+
+
+def test_entry_view_model_ignores_tone_and_portrait_metadata() -> None:
+    entry = ChatHistoryEntry(
+        created_at="2026-05-30T16:20:30+08:00",
+        role="assistant",
+        content="原文",
+        translation="译文",
+        tone="困惑",
+        portrait="张嘴疑问",
+    )
+
+    view = _entry_view_model(entry, "zh", "桜")
+
+    assert view.content == "译文"
+    assert view.meta_text == "桜 · 2026-05-30 16:20:30"

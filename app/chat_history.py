@@ -12,6 +12,8 @@ class ChatHistoryEntry:
     role: str
     content: str
     translation: str = ""
+    tone: str = ""
+    portrait: str = ""
 
     def display_content(self, subtitle_language: str) -> str:
         if self.role == "assistant" and subtitle_language == "zh" and self.translation.strip():
@@ -26,7 +28,14 @@ class ChatHistoryStore:
         self.path = path
         self.assistant_name = assistant_name
 
-    def append(self, role: str, content: str, translation: str = "") -> None:
+    def append(
+        self,
+        role: str,
+        content: str,
+        translation: str = "",
+        tone: str = "",
+        portrait: str = "",
+    ) -> None:
         entry = {
             "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "role": role,
@@ -34,6 +43,10 @@ class ChatHistoryStore:
         }
         if translation.strip():
             entry["translation"] = translation.strip()
+        if tone.strip():
+            entry["tone"] = tone.strip()
+        if portrait.strip():
+            entry["portrait"] = portrait.strip()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -58,16 +71,24 @@ class ChatHistoryStore:
             role = data.get("role")
             content = data.get("content")
             translation = data.get("translation", "")
+            tone = data.get("tone", "")
+            portrait = data.get("portrait", "")
             if not all(isinstance(value, str) for value in (created_at, role, content)):
                 continue
             if not isinstance(translation, str):
                 translation = ""
+            if not isinstance(tone, str):
+                tone = ""
+            if not isinstance(portrait, str):
+                portrait = ""
             entries.append(
                 ChatHistoryEntry(
                     created_at=created_at,
                     role=role,
                     content=content,
                     translation=translation,
+                    tone=tone,
+                    portrait=portrait,
                 )
             )
         return entries

@@ -12,7 +12,7 @@ from app.chat_reply import ChatSegment
 from app.portrait_utils import should_crossfade_portrait
 
 
-PORTRAIT_TRANSITION_MS = 220
+PORTRAIT_TRANSITION_MS = 1400
 
 
 class PortraitController(QObject):

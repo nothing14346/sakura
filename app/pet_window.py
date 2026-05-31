@@ -384,6 +384,7 @@ class PetWindow(QWidget):
 
         self.setStyleSheet(PET_WINDOW_STYLEHEET)
         self._apply_fonts()
+        self._load_reply_history_from_store()
         self._update_reply_history_buttons()
         for drag_widget in (
             self.label,
@@ -484,6 +485,22 @@ class PetWindow(QWidget):
         self.reply_history_segments.extend(clean_segments)
         if self.reply_history_index is None:
             self.reply_history_index = len(self.reply_history_segments) - 1
+        self._update_reply_history_buttons()
+
+    def _load_reply_history_from_store(self) -> None:
+        try:
+            entries = self.history_store.load()
+        except OSError as exc:
+            print(f"[History] 回溯历史读取失败：{exc}")
+            debug_log("History", "回溯历史读取失败", {"error": str(exc)})
+            entries = []
+        self.reply_history_segments = _reply_history_segments_from_entries(entries)
+        self.reply_history_index = (
+            len(self.reply_history_segments) - 1
+            if self.reply_history_segments
+            else None
+        )
+        self.reply_history_review_active = False
         self._update_reply_history_buttons()
 
     def _sync_reply_history_index_for_segment(self, segment: ChatSegment) -> None:
@@ -2027,9 +2044,16 @@ class PetWindow(QWidget):
             timeout_seconds=60,
         )
 
-    def _record_history(self, role: str, content: str, translation: str = "") -> None:
+    def _record_history(
+        self,
+        role: str,
+        content: str,
+        translation: str = "",
+        tone: str = "",
+        portrait: str = "",
+    ) -> None:
         try:
-            self.history_store.append(role, content, translation)
+            self.history_store.append(role, content, translation, tone, portrait)
         except OSError as exc:
             print(f"[History] 写入失败：{exc}")
             debug_log(
@@ -2039,6 +2063,8 @@ class PetWindow(QWidget):
                     "role": role,
                     "content": content,
                     "translation": translation,
+                    "tone": tone,
+                    "portrait": portrait,
                     "error": str(exc),
                 },
             )
@@ -2048,7 +2074,13 @@ class PetWindow(QWidget):
         if not clean_segments:
             return
         for segment in clean_segments:
-            self._record_history("assistant", segment.text, segment.translation)
+            self._record_history(
+                "assistant",
+                segment.text,
+                segment.translation,
+                segment.tone,
+                segment.portrait,
+            )
 
     @Slot()
     def _check_due_reminders(self) -> None:
@@ -2149,12 +2181,9 @@ class PetWindow(QWidget):
         if self.history_window is not None:
             self.history_window.set_history_store(self.history_store, profile.display_name)
 
+        self._load_reply_history_from_store()
         if profile.id != previous_character_id:
             self.messages = []
-            self.reply_history_segments = []
-            self.reply_history_index = None
-            self.reply_history_review_active = False
-            self._update_reply_history_buttons()
             self.subtitle_controller.cancel_reply_flow(profile.initial_message)
 
     def _create_history_store(self, profile: CharacterProfile) -> ChatHistoryStore:
@@ -2260,6 +2289,29 @@ def _last_user_message_index(messages: list[dict[str, Any]]) -> int | None:
         if messages[index].get("role") == "user":
             return index
     return None
+
+
+def _reply_history_segments_from_entries(entries: list[ChatHistoryEntry]) -> list[ChatSegment]:
+    segments: list[ChatSegment] = []
+    for entry in entries:
+        if entry.role != "assistant" or not entry.content.strip():
+            continue
+        tone = entry.tone.strip()
+        if tone:
+            segment = ChatSegment(
+                entry.content.strip(),
+                tone,
+                entry.translation.strip(),
+                entry.portrait.strip(),
+            )
+        else:
+            segment = ChatSegment(
+                entry.content.strip(),
+                translation=entry.translation.strip(),
+                portrait=entry.portrait.strip(),
+            )
+        segments.append(segment)
+    return segments
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:

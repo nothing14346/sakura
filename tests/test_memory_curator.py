@@ -11,6 +11,7 @@ from app.agent.memory_curator import (
     DEFAULT_AUTO_MEMORY_TRIGGER_TURNS,
     MemoryCurationState,
     MemoryCurator,
+    _entries_for_model,
 )
 from app.chat_history import ChatHistoryEntry
 
@@ -78,6 +79,30 @@ def test_memory_curation_state_waits_until_trigger_turns() -> None:
     state.increment_pending_turns()
 
     assert state.pending_turns() == DEFAULT_AUTO_MEMORY_TRIGGER_TURNS
+
+
+def test_memory_entries_ignore_tone_and_portrait_metadata() -> None:
+    entries = _entries_for_model(
+        [
+            ChatHistoryEntry(
+                created_at="2026-05-31T12:00:00+08:00",
+                role="assistant",
+                content="覚えておくね。",
+                translation="我会记住。",
+                tone="中性",
+                portrait="站立待机",
+            )
+        ]
+    )
+
+    assert entries == [
+        {
+            "created_at": "2026-05-31T12:00:00+08:00",
+            "role": "assistant",
+            "content": "覚えておくね。",
+            "translation": "我会记住。",
+        }
+    ]
 
 
 def _entry(role: str, content: str) -> ChatHistoryEntry:
