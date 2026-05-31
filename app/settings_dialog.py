@@ -32,8 +32,10 @@ from app.character_loader import CharacterProfile, CharacterRegistry
 from app.proactive_care import (
     PROACTIVE_MAX_COOLDOWN_MINUTES,
     PROACTIVE_MAX_CHECK_INTERVAL_MINUTES,
+    PROACTIVE_MAX_SCREEN_CONTEXT_BATCH_LIMIT,
     PROACTIVE_MIN_COOLDOWN_MINUTES,
     PROACTIVE_MIN_CHECK_INTERVAL_MINUTES,
+    PROACTIVE_MIN_SCREEN_CONTEXT_BATCH_LIMIT,
     ProactiveCareSettings,
 )
 from app.tts import GPTSoVITSTTSSettings, TTSConfigError
@@ -244,9 +246,6 @@ class SettingsDialog(QDialog):
         proactive_care_settings: ProactiveCareSettings,
     ) -> QWidget:
         tab = QWidget(self)
-        self.proactive_care_enabled_check = QCheckBox("启用主动关怀", tab)
-        self.proactive_care_enabled_check.setChecked(proactive_care_settings.enabled)
-
         self.proactive_screen_context_enabled_check = QCheckBox("允许模型主动获取屏幕信息", tab)
         self.proactive_screen_context_enabled_check.setChecked(
             proactive_care_settings.screen_context_enabled
@@ -272,15 +271,38 @@ class SettingsDialog(QDialog):
             proactive_care_settings.normalized().cooldown_minutes
         )
 
+        self.proactive_batch_limit_spin = QSpinBox(tab)
+        self.proactive_batch_limit_spin.setRange(
+            PROACTIVE_MIN_SCREEN_CONTEXT_BATCH_LIMIT,
+            PROACTIVE_MAX_SCREEN_CONTEXT_BATCH_LIMIT,
+        )
+        self.proactive_batch_limit_spin.setSuffix(" 张")
+        self.proactive_batch_limit_spin.setValue(
+            proactive_care_settings.normalized().screen_context_batch_limit
+        )
+        self.proactive_screen_context_enabled_check.toggled.connect(
+            self._sync_proactive_interval_controls
+        )
+        self._sync_proactive_interval_controls(
+            self.proactive_screen_context_enabled_check.isChecked()
+        )
+
         form_layout = QFormLayout()
         form_layout.setContentsMargins(16, 18, 16, 16)
         form_layout.setSpacing(12)
-        form_layout.addRow("", self.proactive_care_enabled_check)
         form_layout.addRow("", self.proactive_screen_context_enabled_check)
         form_layout.addRow("主动检查间隔", self.proactive_check_interval_spin)
         form_layout.addRow("主动打扰冷却", self.proactive_cooldown_spin)
+        form_layout.addRow("单次最多发送截图", self.proactive_batch_limit_spin)
         tab.setLayout(form_layout)
         return tab
+
+    @Slot(bool)
+    def _sync_proactive_interval_controls(self, enabled: bool) -> None:
+        """主动屏幕获取关闭时，不允许调整主动关怀时间参数。"""
+        self.proactive_check_interval_spin.setEnabled(enabled)
+        self.proactive_cooldown_spin.setEnabled(enabled)
+        self.proactive_batch_limit_spin.setEnabled(enabled)
 
     def _build_memory_tab(self, memory_store: MemoryStore) -> QWidget:
         tab = QWidget(self)
@@ -497,10 +519,11 @@ class SettingsDialog(QDialog):
         self.result_tts_settings = tts_settings
         self.result_character_id = self._selected_character_id()
         self.result_proactive_care_settings = ProactiveCareSettings(
-            enabled=self.proactive_care_enabled_check.isChecked(),
+            enabled=self.proactive_screen_context_enabled_check.isChecked(),
             screen_context_enabled=self.proactive_screen_context_enabled_check.isChecked(),
             check_interval_minutes=self.proactive_check_interval_spin.value(),
             cooldown_minutes=self.proactive_cooldown_spin.value(),
+            screen_context_batch_limit=self.proactive_batch_limit_spin.value(),
         )
         super().accept()
 

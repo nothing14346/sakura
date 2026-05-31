@@ -14,8 +14,8 @@ from app.agent.mcp.bridge import MCPToolSpec
 from app.agent.mcp.config import load_mcp_config
 from app.agent.mcp.provider import MCPToolProvider, register_mcp_tools_from_config
 from app.agent.reminders import ReminderStore
-from app.agent.runtime import AgentRuntime, _build_tool_results_message
-from app.agent.runtime import _redact_tool_result_for_model
+from app.agent.runtime import AgentRuntime, _build_event_messages, _build_tool_results_message
+from app.agent.runtime import _redact_event_for_model, _redact_tool_result_for_model
 from app.agent.screen_tools import (
     OBSERVE_SCREEN_TOOL_NAME,
     SCREEN_OBSERVATION_DISABLED_ERROR,
@@ -28,6 +28,7 @@ from app.context_trimming import MAX_MODEL_CONTEXT_MESSAGES, trim_messages_for_m
 from app.proactive_care import (
     PROACTIVE_CHECK_INTERVAL_MINUTES_KEY,
     PROACTIVE_COOLDOWN_MINUTES_KEY,
+    PROACTIVE_SCREEN_CONTEXT_BATCH_LIMIT_KEY,
     PROACTIVE_SCREEN_CONTEXT_ENABLED_KEY,
     ProactiveCareSettings,
 )
@@ -95,6 +96,7 @@ def test_proactive_care_settings_default_to_disabled() -> None:
     assert not settings.screen_context_enabled
     assert settings.check_interval_minutes == 20
     assert settings.cooldown_minutes == 10
+    assert settings.screen_context_batch_limit == 6
 
 
 def test_proactive_care_settings_clamp_intervals() -> None:
@@ -107,6 +109,7 @@ def test_proactive_care_settings_clamp_intervals() -> None:
                 f"{PROACTIVE_SCREEN_CONTEXT_ENABLED_KEY}=true",
                 f"{PROACTIVE_CHECK_INTERVAL_MINUTES_KEY}=999",
                 f"{PROACTIVE_COOLDOWN_MINUTES_KEY}=999",
+                f"{PROACTIVE_SCREEN_CONTEXT_BATCH_LIMIT_KEY}=999",
             ]
         ),
         encoding="utf-8",
@@ -118,6 +121,7 @@ def test_proactive_care_settings_clamp_intervals() -> None:
     assert settings.screen_context_enabled
     assert settings.check_interval_minutes == 120
     assert settings.cooldown_minutes == 120
+    assert settings.screen_context_batch_limit == 20
 
 
 def test_proactive_care_settings_min_intervals_are_one_minute() -> None:
@@ -128,6 +132,7 @@ def test_proactive_care_settings_min_intervals_are_one_minute() -> None:
             [
                 f"{PROACTIVE_CHECK_INTERVAL_MINUTES_KEY}=0",
                 f"{PROACTIVE_COOLDOWN_MINUTES_KEY}=0",
+                f"{PROACTIVE_SCREEN_CONTEXT_BATCH_LIMIT_KEY}=0",
             ]
         ),
         encoding="utf-8",
@@ -137,6 +142,7 @@ def test_proactive_care_settings_min_intervals_are_one_minute() -> None:
 
     assert settings.check_interval_minutes == 1
     assert settings.cooldown_minutes == 1
+    assert settings.screen_context_batch_limit == 1
 
 
 def test_proactive_care_settings_invalid_cooldown_uses_default() -> None:
@@ -152,6 +158,19 @@ def test_proactive_care_settings_invalid_cooldown_uses_default() -> None:
     assert settings.cooldown_minutes == 10
 
 
+def test_proactive_care_settings_invalid_batch_limit_uses_default() -> None:
+    env_path = _runtime_root_path("proactive_invalid_batch_limit") / ".env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text(
+        f"{PROACTIVE_SCREEN_CONTEXT_BATCH_LIMIT_KEY}=many",
+        encoding="utf-8",
+    )
+
+    settings = ProactiveCareSettings.load(env_path)
+
+    assert settings.screen_context_batch_limit == 6
+
+
 def test_proactive_care_settings_save_writes_cooldown() -> None:
     env_path = _runtime_root_path("proactive_save_cooldown") / ".env"
 
@@ -160,15 +179,33 @@ def test_proactive_care_settings_save_writes_cooldown() -> None:
         screen_context_enabled=True,
         check_interval_minutes=3,
         cooldown_minutes=7,
+        screen_context_batch_limit=4,
     ).save(env_path)
 
     text = env_path.read_text(encoding="utf-8")
     assert "PROACTIVE_CARE_ENABLED=true" in text
+    assert f"{PROACTIVE_SCREEN_CONTEXT_ENABLED_KEY}=true" in text
     assert f"{PROACTIVE_CHECK_INTERVAL_MINUTES_KEY}=3" in text
     assert f"{PROACTIVE_COOLDOWN_MINUTES_KEY}=7" in text
+    assert f"{PROACTIVE_SCREEN_CONTEXT_BATCH_LIMIT_KEY}=4" in text
 
 
-def test_proactive_care_screen_context_requires_active_care_and_screen_context() -> None:
+def test_proactive_care_settings_save_syncs_legacy_enabled_key() -> None:
+    env_path = _runtime_root_path("proactive_save_sync_enabled") / ".env"
+
+    ProactiveCareSettings(
+        enabled=True,
+        screen_context_enabled=False,
+        check_interval_minutes=3,
+        cooldown_minutes=7,
+    ).save(env_path)
+
+    text = env_path.read_text(encoding="utf-8")
+    assert "PROACTIVE_CARE_ENABLED=false" in text
+    assert f"{PROACTIVE_SCREEN_CONTEXT_ENABLED_KEY}=false" in text
+
+
+def test_proactive_care_screen_context_flag_controls_active_care() -> None:
     enabled_settings = ProactiveCareSettings(
         enabled=True,
         screen_context_enabled=True,
@@ -186,7 +223,7 @@ def test_proactive_care_screen_context_requires_active_care_and_screen_context()
     )
 
     assert enabled_settings.allows_screen_context()
-    assert not care_disabled_settings.allows_screen_context()
+    assert care_disabled_settings.allows_screen_context()
     assert not screen_disabled_settings.allows_screen_context()
 
 
@@ -1128,6 +1165,62 @@ def test_proactive_check_event_attaches_screen_context_image() -> None:
     assert "轻微吃醋" in client.prompts[0]
     assert "主动搭话时不要固定使用“提醒”语气" in client.prompts[0]
     assert "自然搭话" in content[0]["text"]
+
+
+def test_proactive_check_event_attaches_screen_context_image_batch() -> None:
+    event = AgentEvent(
+        type="proactive_check",
+        payload={
+            "screen_contexts": [
+                {
+                    "data_url": "data:image/jpeg;base64,first",
+                    "width": 800,
+                    "height": 600,
+                    "captured_at": "2026-05-30T12:00:00+08:00",
+                    "screen_name": "DISPLAY1",
+                },
+                {
+                    "data_url": "data:image/jpeg;base64,second",
+                    "width": 800,
+                    "height": 600,
+                    "captured_at": "2026-05-30T12:10:00+08:00",
+                    "screen_name": "DISPLAY1",
+                },
+            ],
+            "screen_context_count": 2,
+        },
+    )
+
+    messages = _build_event_messages(event)
+    content = messages[0]["content"]
+
+    assert isinstance(content, list)
+    assert content[1]["image_url"]["url"] == "data:image/jpeg;base64,first"
+    assert content[2]["image_url"]["url"] == "data:image/jpeg;base64,second"
+    assert "first" not in content[0]["text"]
+    assert "second" not in content[0]["text"]
+    assert "image_attached" in content[0]["text"]
+    assert "screen_contexts" in content[0]["text"]
+
+
+def test_proactive_check_event_redacts_screen_context_image_batch() -> None:
+    redacted = _redact_event_for_model(
+        AgentEvent(
+            type="proactive_check",
+            payload={
+                "screen_contexts": [
+                    {"data_url": "data:image/jpeg;base64,first", "width": 800},
+                    {"data_url": "data:image/jpeg;base64,second", "width": 800},
+                ],
+            },
+        )
+    )
+
+    contexts = redacted["payload"]["screen_contexts"]
+    assert contexts == [
+        {"width": 800, "image_attached": True},
+        {"width": 800, "image_attached": True},
+    ]
 
 
 def test_proactive_check_event_can_continue_tool_loop_after_tool_results() -> None:

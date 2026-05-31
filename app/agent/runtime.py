@@ -546,7 +546,8 @@ class AgentRuntime:
             example_tone = "中性"
             proactive_rules = """
 - 这是低打扰主动搭话，不是用户主动提问；如果没有明确问题，只说 1-2 段即可。
-- 主动搭话不是关怀模板，也不是固定的护眼提醒。先判断事件里是否附加了 screen_context.image_attached；如果有，优先理解屏幕画面本身，再决定要聊什么。
+- 主动搭话不是关怀模板，也不是固定的护眼提醒。先判断事件里是否附加了 screen_context.image_attached 或 screen_contexts；如果有，优先理解屏幕画面本身，再决定要聊什么。
+- 如果事件附加了多张 screen_contexts，它们表示一段时间内按顺序捕获的屏幕画面；概括这段时间的活动趋势，不要逐张机械描述，也不要把推测说成确定事实。
 - seconds_since_pet_interaction 只表示用户一段时间没有和桌宠交互，不代表用户离开、电脑没操作、屏幕没变化或没有活动。
 - 不要根据 seconds_since_pet_interaction 说“没动静”“去哪了”“消失了”“是不是离开了”等判断；它只能作为降低打扰频率的背景信息。
 - 如果能看出屏幕内容，请围绕用户正在看的具体内容自然接话：可以点出界面类型、正在处理的任务、明显的报错/搜索/文档/代码/设置/聊天/视频/音乐/角色内容，并提出一个具体、轻量的问题或评论。
@@ -912,12 +913,8 @@ def _summarize_tool_results(results: list[ToolExecutionResult]) -> str:
 
 def _build_event_messages(event: AgentEvent) -> list[ChatMessage]:
     text = _format_event_for_model(event)
-    screen_context = event.payload.get("screen_context")
-    if not isinstance(screen_context, dict):
-        return [{"role": "user", "content": text}]
-
-    data_url = screen_context.get("data_url")
-    if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+    image_parts = _build_event_screen_context_image_parts(event.payload)
+    if not image_parts:
         return [{"role": "user", "content": text}]
 
     return [
@@ -928,16 +925,43 @@ def _build_event_messages(event: AgentEvent) -> list[ChatMessage]:
                     "type": "text",
                     "text": text,
                 },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": data_url,
-                        "detail": "low",
-                    },
-                },
+                *image_parts,
             ],
         }
     ]
+
+
+def _build_event_screen_context_image_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    screen_contexts = payload.get("screen_contexts")
+    image_parts: list[dict[str, Any]] = []
+    if isinstance(screen_contexts, list):
+        for screen_context in screen_contexts:
+            if isinstance(screen_context, dict):
+                image_part = _build_screen_context_image_part(screen_context)
+                if image_part is not None:
+                    image_parts.append(image_part)
+    if image_parts:
+        return image_parts
+
+    screen_context = payload.get("screen_context")
+    if isinstance(screen_context, dict):
+        image_part = _build_screen_context_image_part(screen_context)
+        if image_part is not None:
+            return [image_part]
+    return []
+
+
+def _build_screen_context_image_part(screen_context: dict[str, Any]) -> dict[str, Any] | None:
+    data_url = screen_context.get("data_url")
+    if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+        return None
+    return {
+        "type": "image_url",
+        "image_url": {
+            "url": data_url,
+            "detail": "low",
+        },
+    }
 
 
 def _format_event_for_model(event: AgentEvent) -> str:
@@ -957,14 +981,26 @@ def _redact_event_for_model(event: AgentEvent) -> dict[str, Any]:
     payload = dict(event.payload)
     screen_context = payload.get("screen_context")
     if isinstance(screen_context, dict):
-        redacted_context = dict(screen_context)
-        if redacted_context.pop("data_url", None):
-            redacted_context["image_attached"] = True
-        payload["screen_context"] = redacted_context
+        payload["screen_context"] = _redact_screen_context_for_model(screen_context)
+    screen_contexts = payload.get("screen_contexts")
+    if isinstance(screen_contexts, list):
+        payload["screen_contexts"] = [
+            _redact_screen_context_for_model(screen_context)
+            if isinstance(screen_context, dict)
+            else screen_context
+            for screen_context in screen_contexts
+        ]
     return {
         "type": event.type,
         "payload": payload,
     }
+
+
+def _redact_screen_context_for_model(screen_context: dict[str, Any]) -> dict[str, Any]:
+    redacted_context = dict(screen_context)
+    if redacted_context.pop("data_url", None):
+        redacted_context["image_attached"] = True
+    return redacted_context
 
 
 def _build_proactive_vision_unsupported_reply() -> ChatReply:
@@ -994,14 +1030,15 @@ def _build_proactive_tool_loop_rules() -> str:
 - seconds_since_pet_interaction 只表示用户一段时间没有和桌宠交互，不代表用户离开、电脑没操作、屏幕没变化或没有活动。
 - 不要根据 seconds_since_pet_interaction 说“没动静”“去哪了”“消失了”“是不是离开了”等判断；它只能作为降低打扰频率的背景信息。
 - 如果能看出屏幕内容，请围绕用户正在看的具体内容自然接话，并提出一个具体、轻量的问题或评论。
-- 如果事件里附加了 screen_context.image_attached，优先理解屏幕画面本身，再决定要聊什么。
+- 如果事件里附加了 screen_context.image_attached 或 screen_contexts，优先理解屏幕画面本身，再决定要聊什么。
+- 如果事件附加了多张 screen_contexts，它们表示一段时间内按顺序捕获的屏幕画面；概括这段时间的活动趋势，不要逐张机械描述，也不要把推测说成确定事实。
 - 找到屏幕话题时，不要在结尾追加“看远处、深呼吸、休息、喝水、别逞强、别硬扛”等通用关怀句；这些会显得机械。
 - 如果看到视频、音乐、游戏、图片、角色或二次元女孩子，可以自然评价内容；若符合夜乃桜的人格，可以轻微吃醋、嘴硬、装作不在意或问“你喜欢这种类型吗”，但不要责备用户。
 - tone 和 portrait 要根据内容选择；主动搭话时不要固定使用“提醒”语气。
 - 你可以使用只读或低风险工具补充上下文，例如读取当前时间、搜索已确认记忆、读取受控浏览器当前内容或状态。
-- 如果可用工具里出现 observe_screen，你也可以因为想看看主人现在在做什么而主动观察屏幕；但同一事件已经有 screen_context.image_attached 时不要再截图。
+- 如果可用工具里出现 observe_screen，你也可以因为想看看主人现在在做什么而主动观察屏幕；但同一事件已经有 screen_context.image_attached 或 screen_contexts 时不要再截图。
 - 只有发现明确、有价值的后续线索时才继续下一步；不要为了显得主动而循环调用工具。
 - 不要主动执行会改变外部状态的工具，除非工具需要确认且你只是发起确认请求。
-- 如果事件已经附加 screen_context.image_attached，优先基于画面判断；不要再请求 observe_screen。
+- 如果事件已经附加 screen_context.image_attached 或 screen_contexts，优先基于画面判断；不要再请求 observe_screen。
 - 最终回复只说给用户听的自然搭话、提问或轻提醒，不要提及内部事件、工具循环或工具协议。
 """.strip()
