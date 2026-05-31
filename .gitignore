@@ -3,16 +3,19 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
 
 .venv/
 venv/
 env/
+node_modules/
 
 .pytest_cache/
 .pytest_tmp/
 .pytest_tmp*/
 .mypy_cache/
 .ruff_cache/
+temp/
 
 *.log
 data/chat_history.jsonl

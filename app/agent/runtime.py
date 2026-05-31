@@ -506,6 +506,11 @@ class AgentRuntime:
         context_strategy = build_context_acquisition_strategy(
             allow_screen_observation=allow_screen_observation
         )
+        screen_observation_rule = (
+            "- 屏幕理解只通过 observe_screen 请求，由 Sakura 现有截图流程处理；不要请求 Windows-MCP 的 Screenshot 或 Snapshot。"
+            if allow_screen_observation
+            else "- 当前没有可用的屏幕观察工具；不要请求 Windows-MCP 的 Screenshot 或 Snapshot，也不要臆造当前屏幕。"
+        )
         return f"""
 {self.system_prompt.strip()}
 
@@ -537,8 +542,11 @@ class AgentRuntime:
 - 如果工具可以帮助完成用户请求，优先用 tool_calls 表达要执行的动作。
 - 不要臆造工具名；只能使用上面列出的工具。
 - requires_confirmation 为 true 的工具只会在用户确认后执行；你仍然可以发起 tool_calls，但必须说明原因。
-- 需要读取网页内容时，优先使用 browser_get_content；需要打开网页时使用 browser_open_url。
-- 需要网页交互时，只能基于当前页面真实内容选择 browser_scroll 或 browser_click，不要臆造 selector 或页面内容。
+- 浏览器内部任务优先使用 browser__ 前缀的 Playwright MCP 工具；先用 browser__browser_snapshot 获取页面结构，再基于真实 target 调用点击、输入、表单、等待等工具。
+- 桌面窗口、应用切换、鼠标坐标、快捷键等浏览器外部任务才使用 windows__ 前缀的 Windows-MCP 工具；不要用 windows__Click/Move/Type 操作普通网页内部元素。
+{screen_observation_rule}
+- 如果 browser__ 工具不可用，读取 Sakura 受控浏览器内容时再使用 browser_get_content；需要打开受控浏览器网页时使用 browser_open_url。
+- 需要网页交互时，只能基于当前页面真实内容选择工具，不要臆造 selector、target 或页面内容。
 {extra_instructions.strip()}
 - 用户说“几分钟后/几秒后/一会儿后”等相对提醒时，add_reminder 必须使用 delay_minutes 或 delay_seconds，不要自己换算 trigger_at。
 - 只有用户给出明确日期或钟点时，add_reminder 才使用 trigger_at。
@@ -880,6 +888,10 @@ def _describe_pending_action(action: PendingToolAction) -> str:
         return f"点击受控浏览器页面元素 {action.arguments.get('selector', '')}"
     if action.tool_name == "open_local_folder":
         return f"打开文件夹 {action.arguments.get('path', '')}"
+    if action.tool_name.startswith("browser__"):
+        return f"执行浏览器 MCP 操作 {action.tool_name.removeprefix('browser__')}"
+    if action.tool_name.startswith("windows__"):
+        return f"执行 Windows 桌面 MCP 操作 {action.tool_name.removeprefix('windows__')}"
     return f"执行 {action.tool_name}"
 
 

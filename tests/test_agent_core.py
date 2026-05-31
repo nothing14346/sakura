@@ -509,6 +509,40 @@ servers:
     assert not config.servers[0].effective_requires_confirmation()
 
 
+def test_mcp_config_parses_tool_filter_and_policies() -> None:
+    config_path = _runtime_root_path("mcp_tool_policy_parse") / "mcp.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        """
+enabled: true
+servers:
+  demo:
+    transport: stdio
+    command: python
+    include_tools: ["Read*", "Danger", "DangerousRead"]
+    exclude_tools: ["DangerousRead"]
+    tool_policies:
+      "Read*":
+        risk: medium
+        requires_confirmation: false
+      Danger:
+        risk: high
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_mcp_config(config_path)
+    server = config.servers[0]
+
+    assert server.allows_tool("ReadPage")
+    assert server.allows_tool("Danger")
+    assert not server.allows_tool("DangerousRead")
+    assert server.effective_tool_risk("ReadPage") == "medium"
+    assert not server.effective_tool_requires_confirmation("ReadPage")
+    assert server.effective_tool_risk("Danger") == "high"
+    assert server.effective_tool_requires_confirmation("Danger")
+
+
 def test_mcp_provider_registers_prefixed_tools_and_schema() -> None:
     root = _runtime_root_path("mcp_register")
     config_dir = root / "data" / "config"
@@ -539,6 +573,41 @@ servers:
     assert tool.group == "mcp"
     assert tool.risk == "medium"
     assert tool.requires_confirmation
+    provider.close()
+
+
+def test_mcp_provider_filters_tools_and_applies_tool_policies() -> None:
+    root = _runtime_root_path("mcp_tool_policy_register")
+    registry = ToolRegistry()
+    provider = MCPToolProvider(
+        load_mcp_config(
+            _write_mcp_config(
+                root,
+                """
+name_prefix: demo_
+risk: high
+include_tools: ["read_state", "click_target"]
+tool_policies:
+  read_state:
+    risk: medium
+    requires_confirmation: false
+""".strip(),
+            )
+        ),
+        bridge_factory=_MultiToolMCPBridge,
+    )
+
+    provider.register_tools(registry)
+
+    read_tool = registry.get("demo_read_state")
+    click_tool = registry.get("demo_click_target")
+    assert read_tool is not None
+    assert click_tool is not None
+    assert registry.get("demo_hidden_tool") is None
+    assert read_tool.risk == "medium"
+    assert not read_tool.requires_confirmation
+    assert click_tool.risk == "high"
+    assert click_tool.requires_confirmation
     provider.close()
 
 
@@ -1657,6 +1726,27 @@ class _FakeMCPBridge:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _MultiToolMCPBridge(_FakeMCPBridge):
+    def list_tools(self) -> list[MCPToolSpec]:
+        return [
+            MCPToolSpec(
+                name="read_state",
+                description="读取状态。",
+                input_schema={"type": "object", "properties": {}},
+            ),
+            MCPToolSpec(
+                name="click_target",
+                description="点击目标。",
+                input_schema={"type": "object", "properties": {}},
+            ),
+            MCPToolSpec(
+                name="hidden_tool",
+                description="不应暴露。",
+                input_schema={"type": "object", "properties": {}},
+            ),
+        ]
 
 
 class _FailingMCPBridge(_FakeMCPBridge):

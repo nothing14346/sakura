@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -63,7 +64,12 @@ class MCPToolProvider:
                     },
                 )
                 bridge.connect()
-                tool_specs = bridge.list_tools()
+                listed_tool_specs = bridge.list_tools()
+                tool_specs = [
+                    tool_spec
+                    for tool_spec in listed_tool_specs
+                    if server.allows_tool(tool_spec.name)
+                ]
             except Exception as exc:
                 print(f"[MCP] 连接或读取工具失败，已跳过 {server.name}：{exc}")
                 debug_log("MCP", "连接或读取工具失败", {"server": server.name, "error": str(exc)})
@@ -83,9 +89,9 @@ class MCPToolProvider:
                         description=_build_description(server, tool_spec),
                         parameters=tool_spec.input_schema,
                         handler=self._make_handler(internal_name),
-                        requires_confirmation=server.effective_requires_confirmation(),
+                        requires_confirmation=server.effective_tool_requires_confirmation(tool_spec.name),
                         group="mcp",
-                        risk=server.risk,
+                        risk=server.effective_tool_risk(tool_spec.name),
                     )
                 )
                 self._tool_targets[internal_name] = (bridge, tool_spec.name)
@@ -97,7 +103,8 @@ class MCPToolProvider:
                 "服务器工具注册完成",
                 {
                     "server": server.name,
-                    "listed": len(tool_specs),
+                    "listed": len(listed_tool_specs),
+                    "filtered": len(listed_tool_specs) - len(tool_specs),
                     "registered": server_registered,
                 },
             )
@@ -175,7 +182,17 @@ def _resolve_runtime_tokens(config: MCPConfig, base_dir: Path) -> MCPConfig:
 
 
 def _expand_runtime_tokens(value: str, base_dir: Path) -> str:
-    return value.replace("{python}", sys.executable).replace("{base_dir}", str(base_dir))
+    return (
+        value.replace("{python}", sys.executable)
+        .replace("{node}", _runtime_executable("node"))
+        .replace("{uv}", _runtime_executable("uv"))
+        .replace("{uvx}", _runtime_executable("uvx"))
+        .replace("{base_dir}", str(base_dir))
+    )
+
+
+def _runtime_executable(command: str) -> str:
+    return shutil.which(command) or command
 
 
 def _close_quietly(bridge: MCPBridgeLike) -> None:

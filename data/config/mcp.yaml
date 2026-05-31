@@ -8,3 +8,82 @@ servers:
     name_prefix: web__
     risk: low
     requires_confirmation: false
+  playwright:
+    transport: stdio
+    command: "{node}"
+    args:
+      - "{base_dir}/tools/mcp/playwright-mcp-0.0.75/cli.js"
+      - "--isolated"
+      - "--browser"
+      - "msedge"
+      - "--image-responses"
+      - "omit"
+    name_prefix: browser__
+    call_timeout: 60
+    risk: high
+    requires_confirmation: true
+    include_tools:
+      - browser_navigate
+      - browser_navigate_back
+      - browser_snapshot
+      - browser_click
+      - browser_type
+      - browser_fill_form
+      - browser_select_option
+      - browser_hover
+      - browser_press_key
+      - browser_wait_for
+      - browser_tabs
+      - browser_close
+    exclude_tools:
+      - browser_take_screenshot
+      - browser_file_upload
+      - browser_drop
+      - browser_evaluate
+      - browser_run_code_unsafe
+    tool_policies:
+      browser_snapshot:
+        risk: medium
+        requires_confirmation: false
+      browser_wait_for:
+        risk: medium
+        requires_confirmation: false
+  windows:
+    transport: stdio
+    command: "{uv}"
+    args:
+      - "--directory"
+      - "{base_dir}/tools/mcp/Windows-MCP-0.8.0"
+      - "run"
+      - "windows-mcp"
+      - "serve"
+      - "--tools"
+      - "App,Click,Type,Scroll,Move,Shortcut,Wait"
+    env:
+      ANONYMIZED_TELEMETRY: "false"
+      WINDOWS_MCP_TOOLS: "App,Click,Type,Scroll,Move,Shortcut,Wait"
+      WINDOWS_MCP_EXCLUDE_TOOLS: "Screenshot,Snapshot,PowerShell,Registry,Process,FileSystem,Clipboard,Scrape,MultiSelect,MultiEdit,Notification"
+    name_prefix: windows__
+    call_timeout: 30
+    risk: high
+    requires_confirmation: true
+    include_tools:
+      - App
+      - Click
+      - Type
+      - Scroll
+      - Move
+      - Shortcut
+      - Wait
+    exclude_tools:
+      - Screenshot
+      - Snapshot
+      - PowerShell
+      - Registry
+      - Process
+      - FileSystem
+      - Clipboard
+      - Scrape
+      - MultiSelect
+      - MultiEdit
+      - Notification
