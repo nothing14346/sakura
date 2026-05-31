@@ -6,7 +6,7 @@ from app.agent import AgentRuntime, MemoryStore, ReminderStore, create_builtin_t
 from app.agent.mcp import MCPRuntimeSettings, register_mcp_tools_from_config
 from app.agent.memory_curator import MemoryCurator, MemoryCurationSettings, MemoryCurationState
 from app.api_client import ApiSettings, OpenAICompatibleClient
-from app.app_context import AppContext
+from app.app_context import AppContext, CoreServices, FeatureServices, StorageServices
 from app.character_loader import (
     DEFAULT_CHARACTER_ID,
     CharacterProfile,
@@ -101,23 +101,29 @@ def build_app_context(base_dir: Path) -> AppContext:
         base_dir=base_dir,
         env_path=env_path,
         settings=settings,
-        api_client=api_client,
         character_registry=character_registry,
         character_profile=character_profile,
         system_prompt=system_prompt,
         tts_provider=tts_provider,
-        memory_store=memory_store,
-        reminder_store=reminder_store,
-        tool_registry=tool_registry,
-        mcp_tool_provider=mcp_tool_provider,
-        agent_runtime=agent_runtime,
-        history_store=history_store,
-        visual_observation_store=visual_observation_store,
-        mcp_settings=mcp_settings,
-        memory_curation_settings=memory_curation_settings,
-        memory_curation_state=memory_curation_state,
-        memory_curator=memory_curator,
-        proactive_care_settings=proactive_care_settings,
+        core=CoreServices(
+            api_client=api_client,
+            tool_registry=tool_registry,
+            agent_runtime=agent_runtime,
+        ),
+        storage=StorageServices(
+            memory_store=memory_store,
+            reminder_store=reminder_store,
+            history_store=history_store,
+            visual_observation_store=visual_observation_store,
+        ),
+        features=FeatureServices(
+            mcp_tool_provider=mcp_tool_provider,
+            mcp_settings=mcp_settings,
+            memory_curation_settings=memory_curation_settings,
+            memory_curation_state=memory_curation_state,
+            memory_curator=memory_curator,
+            proactive_care_settings=proactive_care_settings,
+        ),
     )
 
 

@@ -15,26 +15,99 @@ from app.visual_observation import VisualObservationStore
 
 
 @dataclass(frozen=True)
+class CoreServices:
+    """聊天运行时和工具注册等核心服务。"""
+
+    api_client: OpenAICompatibleClient
+    tool_registry: ToolRegistry
+    agent_runtime: AgentRuntime
+
+
+@dataclass(frozen=True)
+class StorageServices:
+    """本地持久化存储服务。"""
+
+    memory_store: MemoryStore
+    reminder_store: ReminderStore
+    history_store: ChatHistoryStore
+    visual_observation_store: VisualObservationStore
+
+
+@dataclass(frozen=True)
+class FeatureServices:
+    """可选功能和后台维护服务。"""
+
+    mcp_tool_provider: MCPToolProvider | None
+    mcp_settings: MCPRuntimeSettings
+    memory_curation_settings: MemoryCurationSettings
+    memory_curation_state: MemoryCurationState
+    memory_curator: MemoryCurator
+    proactive_care_settings: ProactiveCareSettings
+
+
+@dataclass(frozen=True)
 class AppContext:
     """应用启动阶段组装出的核心依赖。"""
 
     base_dir: Path
     env_path: Path
     settings: ApiSettings
-    api_client: OpenAICompatibleClient
     character_registry: CharacterRegistry
     character_profile: CharacterProfile
     system_prompt: str
     tts_provider: TTSProvider
-    memory_store: MemoryStore
-    reminder_store: ReminderStore
-    tool_registry: ToolRegistry
-    mcp_tool_provider: MCPToolProvider | None
-    agent_runtime: AgentRuntime
-    history_store: ChatHistoryStore
-    visual_observation_store: VisualObservationStore
-    mcp_settings: MCPRuntimeSettings
-    memory_curation_settings: MemoryCurationSettings
-    memory_curation_state: MemoryCurationState
-    memory_curator: MemoryCurator
-    proactive_care_settings: ProactiveCareSettings
+    core: CoreServices
+    storage: StorageServices
+    features: FeatureServices
+
+    @property
+    def api_client(self) -> OpenAICompatibleClient:
+        return self.core.api_client
+
+    @property
+    def tool_registry(self) -> ToolRegistry:
+        return self.core.tool_registry
+
+    @property
+    def agent_runtime(self) -> AgentRuntime:
+        return self.core.agent_runtime
+
+    @property
+    def memory_store(self) -> MemoryStore:
+        return self.storage.memory_store
+
+    @property
+    def reminder_store(self) -> ReminderStore:
+        return self.storage.reminder_store
+
+    @property
+    def history_store(self) -> ChatHistoryStore:
+        return self.storage.history_store
+
+    @property
+    def visual_observation_store(self) -> VisualObservationStore:
+        return self.storage.visual_observation_store
+
+    @property
+    def mcp_tool_provider(self) -> MCPToolProvider | None:
+        return self.features.mcp_tool_provider
+
+    @property
+    def mcp_settings(self) -> MCPRuntimeSettings:
+        return self.features.mcp_settings
+
+    @property
+    def memory_curation_settings(self) -> MemoryCurationSettings:
+        return self.features.memory_curation_settings
+
+    @property
+    def memory_curation_state(self) -> MemoryCurationState:
+        return self.features.memory_curation_state
+
+    @property
+    def memory_curator(self) -> MemoryCurator:
+        return self.features.memory_curator
+
+    @property
+    def proactive_care_settings(self) -> ProactiveCareSettings:
+        return self.features.proactive_care_settings

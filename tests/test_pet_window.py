@@ -426,6 +426,14 @@ class _DummyButton:
         self.text = text
 
 
+class _DummySubtitleController:
+    def __init__(self) -> None:
+        self.cancelled_with: list[str | None] = []
+
+    def cancel_reply_flow(self, placeholder_text: str | None = None) -> None:
+        self.cancelled_with.append(placeholder_text)
+
+
 def test_manual_screenshot_empty_input_sends_default_text() -> None:
     window, requests, history = _build_minimal_manual_screenshot_window("")
 
@@ -701,16 +709,13 @@ def _build_minimal_manual_screenshot_window(text: str):
     )
     window.screen_observation_enabled = True
     window.messages = []
-    window.reply_sequence_id = 0
-    window.pending_reply_segments = []
     window.active_interaction_id = ""
+    window.subtitle_controller = _DummySubtitleController()
     window._mark_user_activity = lambda: None
     window._begin_interaction = lambda _source: setattr(window, "active_interaction_id", "test")
     window._log_interaction_stage = lambda *_args, **_kwargs: None
     window._end_interaction = lambda _outcome: None
     window._set_pending_tool_action = lambda _action: None
-    window._reset_current_segment_progress = lambda: None
-    window.set_speech = lambda _text: None
     window._record_history = lambda *args: history.append(args)
     window._clear_proactive_screen_context_batch = lambda _reason: None
     window._start_chat_worker = lambda request_messages: requests.append(request_messages)
@@ -797,17 +802,6 @@ def _minimal_tts_settings() -> GPTSoVITSTTSSettings:
 
 
 def test_reply_segments_queue_while_current_segment_is_active() -> None:
-    from app.pet_window import PetWindow
-
-    class MinimalReplyWindow:
-        _show_reply_segments = PetWindow._show_reply_segments
-        _start_reply_segments_now = PetWindow._start_reply_segments_now
-        _is_reply_sequence_active = PetWindow._is_reply_sequence_active
-        _show_next_reply_segment = PetWindow._show_next_reply_segment
-        _end_interaction_if_reply_done = PetWindow._end_interaction_if_reply_done
-        _show_next_queued_reply_batch = PetWindow._show_next_queued_reply_batch
-        _reset_current_segment_progress = PetWindow._reset_current_segment_progress
-
     class DummyTTS:
         def __init__(self) -> None:
             self.spoken: list[str] = []
@@ -815,65 +809,83 @@ def test_reply_segments_queue_while_current_segment_is_active() -> None:
         def speak(self, text, tone, on_finished=None, on_started=None):  # type: ignore[no-untyped-def]
             self.spoken.append(text)
 
-    window = MinimalReplyWindow()
-    window.reply_sequence_id = 0
-    window.reply_advance_token = 0
-    window.pending_reply_segments = []
-    window.queued_reply_segment_batches = []
-    window.current_segment = None
-    window.current_segment_sequence_id = None
-    window.current_segment_speech_done = False
-    window.current_segment_tts_done = True
-    window.reply_advance_scheduled = False
-    window.active_interaction_id = "interaction-1"
-    window.tts_provider = DummyTTS()
-    window._log_interaction_stage = lambda *_args, **_kwargs: None
-    window._preload_portrait_for_segment = lambda _segment: None
-    window._take_prepared_tts_for_segment = lambda _segment: None
-    window._prepare_next_reply_segment = lambda: None
-    window._discard_prepared_next_tts = lambda: None
+        def discard_prepared(self, _handle):  # type: ignore[no-untyped-def]
+            pass
+
+    from app.ui.subtitle_controller import SubtitleController
+    from app.voice import VoicePlaybackController
+
+    class DummyLabel:
+        def clear(self) -> None:
+            pass
+
+        def setText(self, _text: str) -> None:
+            pass
+
     ended = []
-    window._end_interaction = lambda outcome: ended.append(outcome)
+    controller = SubtitleController(
+        DummyLabel(),  # type: ignore[arg-type]
+        VoicePlaybackController(DummyTTS(), lambda *_args, **_kwargs: None),
+        "zh",
+        lambda *_args, **_kwargs: None,
+        lambda _segment: None,
+        lambda: ended.append("reply_completed"),
+        lambda: True,
+    )
 
     first = ChatSegment("先找到了", "中性", "先找到了")
     second = ChatSegment("执行前确认", "提醒", "执行前确认")
 
-    window._show_reply_segments([first])
-    assert window.current_segment == first
+    controller.show_segments([first])
+    assert controller.current_segment == first
 
-    window._show_reply_segments([second])
-    assert window.current_segment == first
-    assert window.queued_reply_segment_batches == [[second]]
+    controller.show_segments([second])
+    assert controller.current_segment == first
+    assert controller.queued_reply_segment_batches == [[second]]
     assert ended == []
 
-    window.current_segment_speech_done = True
-    window.current_segment_tts_done = True
-    window._end_interaction_if_reply_done()
+    controller.current_segment_speech_done = True
+    controller.current_segment_tts_done = True
+    controller._end_interaction_if_reply_done()
 
-    assert window.current_segment == second
-    assert window.queued_reply_segment_batches == []
+    assert controller.current_segment == second
+    assert controller.queued_reply_segment_batches == []
     assert ended == []
 
 
 def test_action_resolution_clears_queued_reply_batches() -> None:
-    from app.pet_window import PetWindow
+    from app.ui.subtitle_controller import SubtitleController
+    from app.voice import VoicePlaybackController
 
-    class MinimalActionWindow:
-        _clear_queued_reply_segments_for_action_resolution = (
-            PetWindow._clear_queued_reply_segments_for_action_resolution
-        )
+    class DummyLabel:
+        def clear(self) -> None:
+            pass
 
-    window = MinimalActionWindow()
-    window.queued_reply_segment_batches = [
+        def setText(self, _text: str) -> None:
+            pass
+
+    class DummyTTS:
+        def discard_prepared(self, _handle):  # type: ignore[no-untyped-def]
+            pass
+
+    stages = []
+    controller = SubtitleController(
+        DummyLabel(),  # type: ignore[arg-type]
+        VoicePlaybackController(DummyTTS(), lambda stage, payload=None: stages.append((stage, payload))),
+        "zh",
+        lambda stage, payload=None: stages.append((stage, payload)),
+        lambda _segment: None,
+        lambda: None,
+        lambda: True,
+    )
+    controller.queued_reply_segment_batches = [
         [ChatSegment("先打开运行窗口")],
         [ChatSegment("执行前确认")],
     ]
-    stages = []
-    window._log_interaction_stage = lambda stage, payload=None: stages.append((stage, payload))
 
-    window._clear_queued_reply_segments_for_action_resolution()
+    controller.clear_queued_reply_segments_for_action_resolution()
 
-    assert window.queued_reply_segment_batches == []
+    assert controller.queued_reply_segment_batches == []
     assert stages == [
         (
             "queued_reply_segments_cleared_for_action",

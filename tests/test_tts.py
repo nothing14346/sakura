@@ -70,6 +70,7 @@ if importlib.util.find_spec("PySide6") is None:
     sys.modules["PySide6.QtMultimedia"] = qtmultimedia_module
 
 from app.tts import GPTSoVITSTTSProvider, GPTSoVITSTTSSettings, _load_tone_references, _resolve_request_text_lang
+from app.voice import VoicePlaybackController
 
 
 def test_tts_mixed_japanese_and_english_uses_auto_lang() -> None:
@@ -174,6 +175,41 @@ def test_tts_weight_switch_error_includes_endpoint_and_path(monkeypatch) -> None
     assert "set_gpt_weights" in messages[0]
     assert "Sakura-e15.ckpt" in messages[0]
     assert "bad weights" in messages[0]
+
+
+def test_voice_playback_controller_falls_back_to_subtitle_callbacks_on_tts_error() -> None:
+    from app.chat_reply import ChatSegment
+
+    class FailingTTS:
+        def speak(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("tts down")
+
+    events: list[str] = []
+    controller = VoicePlaybackController(FailingTTS(), lambda *_args, **_kwargs: None)  # type: ignore[arg-type]
+
+    controller.speak_segment(
+        ChatSegment("こんにちは", "中性"),
+        1,
+        on_started=lambda: events.append("started"),
+        on_finished=lambda: events.append("finished"),
+    )
+
+    assert events == ["started", "finished"]
+
+
+def test_voice_playback_controller_ignores_prepare_error() -> None:
+    from app.chat_reply import ChatSegment
+
+    class FailingPrepareTTS:
+        def prepare(self, *_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("prepare down")
+
+        def discard_prepared(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    controller = VoicePlaybackController(FailingPrepareTTS(), lambda *_args, **_kwargs: None)  # type: ignore[arg-type]
+
+    controller.prepare_next(ChatSegment("次の一段", "中性"))
 
 
 def _minimal_tts_settings() -> GPTSoVITSTTSSettings:

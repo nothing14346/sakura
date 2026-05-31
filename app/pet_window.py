@@ -6,11 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import (
-    QEasingCurve,
     QEvent,
-    QParallelAnimationGroup,
     QPoint,
-    QPropertyAnimation,
     QRect,
     Qt,
     QThread,
@@ -66,7 +63,6 @@ from app.chat_worker import ChatWorker, EventWorker
 from app.debug_log import debug_log, summarize_messages
 from app.env_config import load_env_file, save_env_values
 from app.history_window import HistoryWindow
-from app.portrait_utils import should_crossfade_portrait
 from app.proactive_care import (
     PROACTIVE_SCREEN_CONTEXT_HISTORY_MARKER,
     PROACTIVE_TIMER_DUE_GRACE_SECONDS,
@@ -87,7 +83,6 @@ from app.tts import (
     GPTSoVITSTTSSettings,
     NullTTSProvider,
     TTSConfigError,
-    TTSPreparedAudio,
     TTSProvider,
 )
 from app.visual_observation import (
@@ -103,14 +98,15 @@ from app.ui import (
     FrostedGlassFrame,
     ManualScreenshotOverlay,
     PET_WINDOW_STYLEHEET,
+    PortraitController,
+    SubtitleController,
+    ToolConfirmationPanel,
     build_pet_tray_menu,
     capture_virtual_desktop_pixmap,
 )
+from app.voice import VoicePlaybackController
 
 
-SPEECH_TYPING_INTERVAL_MS = 35
-REPLY_SEGMENT_PAUSE_MS = 100
-PORTRAIT_TRANSITION_MS = 220
 REMINDER_CHECK_INTERVAL_MS = 30_000
 SUBTITLE_LANGUAGE_KEY = "SUBTITLE_LANGUAGE"
 SUBTITLE_LANGUAGE_JA = "ja"
@@ -131,7 +127,6 @@ class PetWindow(QWidget):
         self.env_path = context.env_path
         self.character_registry = context.character_registry
         self.character_profile = context.character_profile
-        self.portrait_path = context.character_profile.default_portrait_path
         self.api_client = context.api_client
         self.system_prompt = context.system_prompt
         self.memory_store = context.memory_store
@@ -159,7 +154,6 @@ class PetWindow(QWidget):
         self.free_access_enabled = self.tool_registry.free_access_enabled
         self.history_window: HistoryWindow | None = None
         self.messages: list[dict[str, Any]] = []
-        self.portrait_pixmap_cache: dict[Path, QPixmap] = {}
         self.worker_thread: QThread | None = None
         self.worker: ChatWorker | EventWorker | None = None
         self.memory_curation_thread: QThread | None = None
@@ -169,19 +163,6 @@ class PetWindow(QWidget):
         self.memory_curation_consumed_turns = 0
         self.drag_offset: QPoint | None = None
         self.stage_size = (860, 640)
-        self.speech_text = ""
-        self.speech_index = 0
-        self.pending_reply_segments: list[ChatSegment] = []
-        self.queued_reply_segment_batches: list[list[ChatSegment]] = []
-        self.current_segment: ChatSegment | None = None
-        self.prepared_next_segment: ChatSegment | None = None
-        self.prepared_next_tts: TTSPreparedAudio | None = None
-        self.reply_sequence_id = 0
-        self.reply_advance_token = 0
-        self.current_segment_sequence_id: int | None = None
-        self.current_segment_speech_done = False
-        self.current_segment_tts_done = True
-        self.reply_advance_scheduled = False
         self.pending_tool_action: PendingToolAction | None = None
         self.pending_manual_screen_observation: ScreenObservation | None = None
         self.manual_screenshot_overlay: ManualScreenshotOverlay | None = None
@@ -205,11 +186,6 @@ class PetWindow(QWidget):
         self.active_interaction_id = ""
         self.active_interaction_started_at: float | None = None
         self.active_interaction_last_at: float | None = None
-        self.portrait_transition_animation: QParallelAnimationGroup | None = None
-        self.portrait_transition_id = 0
-        self.speech_timer = QTimer(self)
-        self.speech_timer.setInterval(SPEECH_TYPING_INTERVAL_MS)
-        self.speech_timer.timeout.connect(self._show_next_speech_char)
         self.reminder_timer = QTimer(self)
         self.reminder_timer.setInterval(REMINDER_CHECK_INTERVAL_MS)
         self.reminder_timer.timeout.connect(self._check_due_reminders)
@@ -261,6 +237,19 @@ class PetWindow(QWidget):
         self.portrait_transition_opacity_effect = QGraphicsOpacityEffect(self.portrait_transition_label)
         self.portrait_transition_opacity_effect.setOpacity(0.0)
         self.portrait_transition_label.setGraphicsEffect(self.portrait_transition_opacity_effect)
+        self.portrait_controller = PortraitController(
+            profile=self.character_profile,
+            parent_widget=self,
+            main_label=self.label,
+            transition_label=self.portrait_transition_label,
+            main_opacity_effect=self.portrait_opacity_effect,
+            transition_opacity_effect=self.portrait_transition_opacity_effect,
+            stage_size=self.stage_size,
+            relayout=self._layout_stage,
+            raise_foreground=self._raise_foreground_controls,
+            on_portrait_changed=self._update_tray_icon_pixmap,
+            parent=self,
+        )
 
         self.bubble = QFrame(self)
         self.bubble.setObjectName("speechBubble")
@@ -274,6 +263,22 @@ class PetWindow(QWidget):
         self.speech_label.setObjectName("speechText")
         self.speech_label.setWordWrap(True)
         self.speech_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.voice_playback_controller = VoicePlaybackController(
+            self.tts_provider,
+            self._log_interaction_stage,
+        )
+        self.subtitle_controller = SubtitleController(
+            self.speech_label,
+            self.voice_playback_controller,
+            self.subtitle_language,
+            self._log_interaction_stage,
+            self._apply_reply_segment,
+            lambda: self._end_interaction("reply_completed"),
+            lambda: bool(self.active_interaction_id),
+            self,
+            preload_segment=self.portrait_controller.preload_for_segment,
+        )
+        self.speech_timer = self.subtitle_controller.speech_timer
 
         bubble_header = QHBoxLayout()
         bubble_header.setContentsMargins(0, 0, 0, 0)
@@ -313,24 +318,19 @@ class PetWindow(QWidget):
         self.screenshot_button.installEventFilter(self)
         self.screenshot_button.clicked.connect(self._handle_screenshot_button_clicked)
 
-        self.confirm_action_button = QPushButton("执行", self.input_bar)
-        self.confirm_action_button.setObjectName("confirmActionButton")
-        self.confirm_action_button.setFixedHeight(38)
-        self.confirm_action_button.hide()
-        self.confirm_action_button.clicked.connect(self.confirm_pending_action)
-
-        self.cancel_action_button = QPushButton("取消", self.input_bar)
-        self.cancel_action_button.setObjectName("cancelActionButton")
-        self.cancel_action_button.setFixedHeight(38)
-        self.cancel_action_button.hide()
-        self.cancel_action_button.clicked.connect(self.cancel_pending_action)
+        self.tool_confirmation_panel = ToolConfirmationPanel(
+            self.confirm_pending_action,
+            self.cancel_pending_action,
+            self.input_bar,
+        )
+        self.confirm_action_button = self.tool_confirmation_panel.confirm_button
+        self.cancel_action_button = self.tool_confirmation_panel.cancel_button
 
         input_layout = QHBoxLayout()
         input_layout.setContentsMargins(10, 7, 10, 7)
         input_layout.setSpacing(8)
         input_layout.addWidget(self.input_edit, 1)
-        input_layout.addWidget(self.confirm_action_button)
-        input_layout.addWidget(self.cancel_action_button)
+        input_layout.addWidget(self.tool_confirmation_panel)
         input_layout.addWidget(self.screenshot_button)
         input_layout.addWidget(self.send_button)
         self.input_bar.setLayout(input_layout)
@@ -346,8 +346,7 @@ class PetWindow(QWidget):
         ):
             drag_widget.installEventFilter(self)
 
-        self.pixmap = self._load_portrait()
-        self._apply_portrait()
+        self.portrait_controller.apply_current()
         self._create_tray_icon()
         self._move_to_default_position()
 
@@ -426,129 +425,17 @@ class PetWindow(QWidget):
             return True
         return False
 
-    def _load_portrait(self, portrait_path: Path | None = None) -> QPixmap:
-        target_path = portrait_path or self.portrait_path
-        cached = self.portrait_pixmap_cache.get(target_path)
-        if cached is not None:
-            return cached
+    def _apply_reply_segment(self, segment: ChatSegment) -> None:
+        self.portrait_controller.apply_for_segment(segment)
 
-        pixmap = QPixmap(str(target_path))
-        if pixmap.isNull():
-            QMessageBox.critical(
-                self,
-                "立绘加载失败",
-                f"无法加载立绘：{target_path}",
-            )
-        self.portrait_pixmap_cache[target_path] = pixmap
-        return pixmap
-
-    def _preload_portrait_for_segment(self, segment: ChatSegment) -> None:
-        next_portrait_path = self.character_profile.portrait_for_segment(segment.portrait, segment.tone)
-        if next_portrait_path not in self.portrait_pixmap_cache:
-            self._load_portrait(next_portrait_path)
-
-    def _apply_portrait_for_segment(self, segment: ChatSegment) -> None:
-        next_portrait_path = self.character_profile.portrait_for_segment(segment.portrait, segment.tone)
-        if next_portrait_path == self.portrait_path:
-            return
-        should_crossfade = should_crossfade_portrait(self.portrait_path, next_portrait_path)
-        next_pixmap = self._load_portrait(next_portrait_path)
-        self.portrait_path = next_portrait_path
-        if should_crossfade:
-            self._crossfade_portrait(next_pixmap)
-        else:
-            self.pixmap = next_pixmap
-            self._apply_portrait()
-        if hasattr(self, "tray_icon"):
-            self.tray_icon.setIcon(QIcon(self.pixmap) if not self.pixmap.isNull() else QIcon())
-
-    def _apply_portrait(self) -> None:
-        self._stop_portrait_transition()
-        if self.pixmap.isNull():
-            self.resize(*self.stage_size)
-            return
-
-        self._apply_pixmap_to_label(self.label, self.pixmap)
-        self.resize(*self.stage_size)
-        self._layout_stage()
-
-    def _apply_pixmap_to_label(self, label: QLabel, pixmap: QPixmap) -> None:
-        scaled = pixmap.scaled(
-            560,
-            570,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        label.setPixmap(scaled)
-        label.resize(scaled.size())
-
-    def _crossfade_portrait(self, next_pixmap: QPixmap) -> None:
-        self._stop_portrait_transition(finish_current=True)
-        self.pixmap = next_pixmap
-        if self.pixmap.isNull():
-            self._apply_portrait()
-            return
-
-        self._apply_pixmap_to_label(self.portrait_transition_label, self.pixmap)
-        self.resize(*self.stage_size)
-        self._layout_stage()
-        self.portrait_opacity_effect.setOpacity(1.0)
-        self.portrait_transition_opacity_effect.setOpacity(0.0)
-        self.portrait_transition_label.show()
-        self.portrait_transition_label.raise_()
+    def _raise_foreground_controls(self) -> None:
         self.bubble.raise_()
         self.input_backdrop.raise_()
         self.input_bar.raise_()
 
-        self.portrait_transition_id += 1
-        transition_id = self.portrait_transition_id
-        animation = QParallelAnimationGroup(self)
-
-        fade_out = QPropertyAnimation(self.portrait_opacity_effect, b"opacity")
-        fade_out.setDuration(PORTRAIT_TRANSITION_MS)
-        fade_out.setStartValue(1.0)
-        fade_out.setEndValue(0.0)
-        fade_out.setEasingCurve(QEasingCurve.Type.InOutQuad)
-
-        fade_in = QPropertyAnimation(self.portrait_transition_opacity_effect, b"opacity")
-        fade_in.setDuration(PORTRAIT_TRANSITION_MS)
-        fade_in.setStartValue(0.0)
-        fade_in.setEndValue(1.0)
-        fade_in.setEasingCurve(QEasingCurve.Type.InOutQuad)
-
-        animation.addAnimation(fade_out)
-        animation.addAnimation(fade_in)
-        animation.finished.connect(lambda: self._finish_portrait_transition(transition_id))
-        self.portrait_transition_animation = animation
-        animation.start()
-
-    def _stop_portrait_transition(self, finish_current: bool = False) -> None:
-        if self.portrait_transition_animation is not None:
-            self.portrait_transition_animation.stop()
-            self.portrait_transition_animation.deleteLater()
-            self.portrait_transition_animation = None
-            self.portrait_transition_id += 1
-        self.portrait_transition_label.hide()
-        self.portrait_transition_label.clear()
-        self.portrait_opacity_effect.setOpacity(1.0)
-        self.portrait_transition_opacity_effect.setOpacity(0.0)
-        if finish_current and not self.pixmap.isNull():
-            self._apply_pixmap_to_label(self.label, self.pixmap)
-            self.resize(*self.stage_size)
-            self._layout_stage()
-
-    def _finish_portrait_transition(self, transition_id: int) -> None:
-        if transition_id != self.portrait_transition_id:
-            return
-        if self.portrait_transition_animation is not None:
-            self.portrait_transition_animation.deleteLater()
-            self.portrait_transition_animation = None
-        self._apply_pixmap_to_label(self.label, self.pixmap)
-        self.portrait_transition_label.hide()
-        self.portrait_transition_label.clear()
-        self.portrait_opacity_effect.setOpacity(1.0)
-        self.portrait_transition_opacity_effect.setOpacity(0.0)
-        self._layout_stage()
+    def _update_tray_icon_pixmap(self, pixmap: QPixmap) -> None:
+        if hasattr(self, "tray_icon"):
+            self.tray_icon.setIcon(QIcon(pixmap) if not pixmap.isNull() else QIcon())
 
     def _apply_fonts(self) -> None:
         text_font = _rounded_chinese_font(13, QFont.Weight.Bold)
@@ -602,7 +489,8 @@ class PetWindow(QWidget):
         self.input_backdrop.update()
 
     def _create_tray_icon(self) -> None:
-        icon = QIcon(self.pixmap) if not self.pixmap.isNull() else QIcon()
+        pixmap = self.portrait_controller.pixmap
+        icon = QIcon(pixmap) if not pixmap.isNull() else QIcon()
         self.tray_icon = QSystemTrayIcon(icon, self)
         self.tray_icon.setToolTip(self.character_profile.display_name)
         self.tray_icon.setContextMenu(self._build_menu())
@@ -835,11 +723,7 @@ class PetWindow(QWidget):
         self._set_pending_tool_action(None)
         self.input_edit.clear()
         self._log_interaction_stage("input_cleared")
-        self.reply_sequence_id += 1
-        self.pending_reply_segments = []
-        self.queued_reply_segment_batches = []
-        self._reset_current_segment_progress()
-        self.set_speech("......")
+        self.subtitle_controller.cancel_reply_flow("......")
         self._log_interaction_stage("placeholder_reply_shown")
 
         visual_observation_jobs: list[VisualObservationJob] = []
@@ -1258,36 +1142,21 @@ class PetWindow(QWidget):
     def _set_pending_tool_action(self, action: PendingToolAction | None) -> None:
         self.pending_tool_action = action
         has_action = action is not None
-        self.confirm_action_button.setVisible(has_action)
-        self.cancel_action_button.setVisible(has_action)
+        self.tool_confirmation_panel.set_action(action)
         self._update_input_backdrop_geometry()
+        panel_state = self.tool_confirmation_panel.state_snapshot()
         debug_log(
             "PetWindow",
             "待确认动作 UI 状态已更新",
             {
                 "has_action": has_action,
                 "tool_name": action.tool_name if action is not None else "",
-                "confirm_visible": self.confirm_action_button.isVisible(),
-                "cancel_visible": self.cancel_action_button.isVisible(),
-                "confirm_enabled": self.confirm_action_button.isEnabled(),
-                "cancel_enabled": self.cancel_action_button.isEnabled(),
+                **panel_state,
             },
         )
 
     def _clear_queued_reply_segments_for_action_resolution(self) -> None:
-        if not self.queued_reply_segment_batches:
-            return
-        cleared_count = len(self.queued_reply_segment_batches)
-        self.queued_reply_segment_batches = []
-        self._log_interaction_stage(
-            "queued_reply_segments_cleared_for_action",
-            {"cleared_batch_count": cleared_count},
-        )
-        debug_log(
-            "PetWindow",
-            "已清理待确认动作相关的排队回复",
-            {"cleared_batch_count": cleared_count},
-        )
+        self.subtitle_controller.clear_queued_reply_segments_for_action_resolution()
 
     @Slot()
     def _check_proactive_care(self) -> None:
@@ -1325,8 +1194,12 @@ class PetWindow(QWidget):
             return False
         if self.input_edit.text().strip() or self.speech_timer.isActive():
             return False
-        if self.current_segment_sequence_id is not None and (
-            not self.current_segment_speech_done or not self.current_segment_tts_done
+        subtitle_controller = getattr(self, "subtitle_controller", None)
+        if subtitle_controller is not None and subtitle_controller.current_segment_in_progress():
+            return False
+        if subtitle_controller is None and getattr(self, "current_segment_sequence_id", None) is not None and (
+            not getattr(self, "current_segment_speech_done", True)
+            or not getattr(self, "current_segment_tts_done", True)
         ):
             return False
         return True
@@ -1549,8 +1422,7 @@ class PetWindow(QWidget):
         if self.messages and self.messages[-1]["role"] == "user":
             self.messages.pop()
         self._record_history("error", message)
-        self._reset_current_segment_progress()
-        self.set_speech("……通信に失敗した。設定を確認して。")
+        self.subtitle_controller.cancel_reply_flow("……通信に失敗した。設定を確認して。")
         QMessageBox.warning(self, "请求失败", message)
         self._end_interaction("error")
 
@@ -1751,34 +1623,18 @@ class PetWindow(QWidget):
         self.input_edit.setEnabled(not busy)
         self.screenshot_button.setEnabled(not busy)
         self.send_button.setEnabled(not busy)
-        self.confirm_action_button.setEnabled(not busy)
-        self.cancel_action_button.setEnabled(not busy)
+        tool_confirmation_panel = getattr(self, "tool_confirmation_panel", None)
+        if tool_confirmation_panel is not None:
+            tool_confirmation_panel.set_busy(busy)
+        else:
+            self.confirm_action_button.setEnabled(not busy)
+            self.cancel_action_button.setEnabled(not busy)
         self.send_button.setText("等待" if busy else "发送")
         self._log_interaction_stage("set_busy", {"busy": busy})
 
     @Slot(str)
     def set_speech(self, text: str) -> None:
-        cleaned = " ".join(text.split())
-        self.speech_timer.stop()
-        self.speech_text = cleaned
-        self.speech_index = 0
-        self.speech_label.clear()
-        if self.speech_text:
-            self.speech_timer.start()
-        self._log_interaction_stage("speech_text_started", {"text": cleaned})
-
-    @Slot()
-    def _show_next_speech_char(self) -> None:
-        if self.speech_index >= len(self.speech_text):
-            self.speech_timer.stop()
-            return
-
-        self.speech_index += 1
-        self.speech_label.setText(self.speech_text[: self.speech_index])
-        if self.speech_index >= len(self.speech_text):
-            self.speech_timer.stop()
-            if self.current_segment_sequence_id is not None:
-                self._mark_segment_speech_done(self.current_segment_sequence_id)
+        self.subtitle_controller.set_speech(text)
 
     def toggle_visible(self) -> None:
         if self.isVisible():
@@ -1885,9 +1741,9 @@ class PetWindow(QWidget):
         mcp_restart_required = dialog.result_mcp_settings != self.mcp_settings
         self.mcp_settings = dialog.result_mcp_settings
         self._sync_proactive_care_timer()
-        self._discard_prepared_next_tts()
         self.retired_tts_providers.append(self.tts_provider)
         self.tts_provider = new_tts_provider
+        self.voice_playback_controller.set_provider(new_tts_provider)
         self._apply_character(selected_profile)
         if hasattr(self, "tray_icon"):
             self.tray_icon.setContextMenu(self._build_menu())
@@ -1913,7 +1769,8 @@ class PetWindow(QWidget):
             return
 
         self._apply_speech_font()
-        self._restart_current_segment_speech()
+        self.subtitle_controller.set_subtitle_language(self.subtitle_language)
+        self.subtitle_controller.restart_current_segment_speech()
         if self.history_window is not None:
             self.history_window.set_subtitle_language(self.subtitle_language)
 
@@ -2066,277 +1923,7 @@ class PetWindow(QWidget):
         )
 
     def _show_reply_segments(self, segments: list[ChatSegment]) -> None:
-        clean_segments = [segment for segment in segments if segment.text.strip()]
-        if self._is_reply_sequence_active():
-            if clean_segments:
-                self.queued_reply_segment_batches.append(clean_segments)
-                self._log_interaction_stage(
-                    "reply_segments_queued",
-                    {
-                        "queued_batch_count": len(self.queued_reply_segment_batches),
-                        "segment_count": len(clean_segments),
-                    },
-                )
-                debug_log(
-                    "PetWindow",
-                    "当前回复未播完，后续分段已排队",
-                    {
-                        "queued_batch_count": len(self.queued_reply_segment_batches),
-                        "segments": [
-                            {
-                                "text": segment.text,
-                                "tone": segment.tone,
-                                "portrait": segment.portrait,
-                                "translation": segment.translation,
-                            }
-                            for segment in clean_segments
-                        ],
-                    },
-                )
-            return
-
-        self._start_reply_segments_now(clean_segments)
-
-    def _start_reply_segments_now(self, segments: list[ChatSegment]) -> None:
-        self.reply_sequence_id += 1
-        self.pending_reply_segments = segments
-        self._log_interaction_stage(
-            "reply_segments_ready",
-            {
-                "sequence_id": self.reply_sequence_id,
-                "segment_count": len(self.pending_reply_segments),
-            },
-        )
-        debug_log(
-            "PetWindow",
-            "准备分段展示回复",
-            {
-                "sequence_id": self.reply_sequence_id,
-                "segments": [
-                    {
-                        "text": segment.text,
-                        "tone": segment.tone,
-                        "portrait": segment.portrait,
-                        "translation": segment.translation,
-                    }
-                    for segment in self.pending_reply_segments
-                ],
-            },
-        )
-        self._reset_current_segment_progress()
-        self._show_next_reply_segment(self.reply_sequence_id)
-
-    def _is_reply_sequence_active(self) -> bool:
-        if self.pending_reply_segments or self.reply_advance_scheduled:
-            return True
-        return (
-            self.current_segment_sequence_id is not None
-            and (not self.current_segment_speech_done or not self.current_segment_tts_done)
-        )
-
-    def _show_next_reply_segment(self, sequence_id: int) -> None:
-        if sequence_id != self.reply_sequence_id or not self.pending_reply_segments:
-            return
-
-        segment = self.pending_reply_segments.pop(0)
-        debug_log(
-            "PetWindow",
-            "展示下一段回复",
-            {
-                "sequence_id": sequence_id,
-                "text": segment.text,
-                "tone": segment.tone,
-                "portrait": segment.portrait,
-                "remaining_segments": len(self.pending_reply_segments),
-            },
-        )
-        self.current_segment = segment
-        self.current_segment_sequence_id = sequence_id
-        self.current_segment_speech_done = False
-        self.current_segment_tts_done = False
-        self.reply_advance_scheduled = False
-        self._preload_portrait_for_segment(segment)
-        prepared_tts = self._take_prepared_tts_for_segment(segment)
-        if prepared_tts is None:
-            self._log_interaction_stage("tts_speak_requested", {"sequence_id": sequence_id, "tone": segment.tone})
-            self.tts_provider.speak(
-                segment.text,
-                segment.tone,
-                on_finished=lambda: self._mark_segment_tts_done(sequence_id),
-                on_started=lambda: self._start_segment_speech(sequence_id),
-            )
-        else:
-            self._log_interaction_stage(
-                "tts_prepared_speak_requested",
-                {"sequence_id": sequence_id, "tone": segment.tone},
-            )
-            self.tts_provider.speak_prepared(
-                prepared_tts,
-                on_started=lambda: self._start_segment_speech(sequence_id),
-                on_finished=lambda: self._mark_segment_tts_done(sequence_id),
-            )
-        self._prepare_next_reply_segment()
-
-    def _start_segment_speech(self, sequence_id: int) -> None:
-        if (
-            sequence_id != self.reply_sequence_id
-            or sequence_id != self.current_segment_sequence_id
-            or self.current_segment is None
-        ):
-            return
-        self._log_interaction_stage(
-            "segment_speech_started",
-            {
-                "sequence_id": sequence_id,
-                "tone": self.current_segment.tone,
-                "portrait": self.current_segment.portrait,
-            },
-        )
-        self._apply_portrait_for_segment(self.current_segment)
-        self.set_speech(self.current_segment.display_text(self.subtitle_language))
-
-    def _mark_segment_speech_done(self, sequence_id: int) -> None:
-        if sequence_id != self.reply_sequence_id or sequence_id != self.current_segment_sequence_id:
-            return
-        self.current_segment_speech_done = True
-        self._log_interaction_stage("segment_text_render_done", {"sequence_id": sequence_id})
-        self._end_interaction_if_reply_done()
-        self._schedule_next_reply_segment_if_ready(sequence_id)
-
-    def _mark_segment_tts_done(self, sequence_id: int) -> None:
-        if sequence_id != self.reply_sequence_id or sequence_id != self.current_segment_sequence_id:
-            return
-        self.current_segment_tts_done = True
-        self._log_interaction_stage("segment_tts_done", {"sequence_id": sequence_id})
-        self._end_interaction_if_reply_done()
-        self._schedule_next_reply_segment_if_ready(sequence_id)
-
-    def _schedule_next_reply_segment_if_ready(self, sequence_id: int) -> None:
-        if (
-            sequence_id != self.reply_sequence_id
-            or sequence_id != self.current_segment_sequence_id
-            or self.reply_advance_scheduled
-            or not self.current_segment_speech_done
-            or not self.current_segment_tts_done
-            or not self.pending_reply_segments
-        ):
-            return
-
-        self.reply_advance_scheduled = True
-        self.reply_advance_token += 1
-        reply_advance_token = self.reply_advance_token
-        self._log_interaction_stage(
-            "next_segment_scheduled",
-            {
-                "sequence_id": sequence_id,
-                "delay_ms": REPLY_SEGMENT_PAUSE_MS,
-                "remaining_segments": len(self.pending_reply_segments),
-            },
-        )
-        QTimer.singleShot(
-            REPLY_SEGMENT_PAUSE_MS,
-            lambda: self._show_scheduled_next_reply_segment(sequence_id, reply_advance_token),
-        )
-
-    def _show_scheduled_next_reply_segment(self, sequence_id: int, reply_advance_token: int) -> None:
-        if reply_advance_token != self.reply_advance_token:
-            return
-        self._log_interaction_stage("next_segment_timer_fired", {"sequence_id": sequence_id})
-        self._show_next_reply_segment(sequence_id)
-
-    def _end_interaction_if_reply_done(self) -> None:
-        if (
-            self.active_interaction_id
-            and self.current_segment_speech_done
-            and self.current_segment_tts_done
-            and not self.pending_reply_segments
-        ):
-            if self.queued_reply_segment_batches:
-                self._show_next_queued_reply_batch()
-                return
-            self._end_interaction("reply_completed")
-
-    def _show_next_queued_reply_batch(self) -> None:
-        if not self.queued_reply_segment_batches:
-            return
-        next_segments = self.queued_reply_segment_batches.pop(0)
-        self._log_interaction_stage(
-            "queued_reply_segments_dequeued",
-            {
-                "remaining_batch_count": len(self.queued_reply_segment_batches),
-                "segment_count": len(next_segments),
-            },
-        )
-        self._start_reply_segments_now(next_segments)
-
-    def _reset_current_segment_progress(self) -> None:
-        self._discard_prepared_next_tts()
-        self.current_segment = None
-        self.reply_advance_token += 1
-        self.current_segment_sequence_id = None
-        self.current_segment_speech_done = False
-        self.current_segment_tts_done = True
-        self.reply_advance_scheduled = False
-
-    def _prepare_next_reply_segment(self) -> None:
-        if not self.pending_reply_segments:
-            self._discard_prepared_next_tts()
-            return
-
-        next_segment = self.pending_reply_segments[0]
-        if self.prepared_next_segment is next_segment and self.prepared_next_tts is not None:
-            return
-
-        self._discard_prepared_next_tts()
-        self.prepared_next_segment = next_segment
-        self._log_interaction_stage(
-            "next_segment_tts_prepare_requested",
-            {
-                "text": next_segment.text,
-                "tone": next_segment.tone,
-                "portrait": next_segment.portrait,
-            },
-        )
-        debug_log(
-            "PetWindow",
-            "预生成下一段 TTS",
-            {
-                "text": next_segment.text,
-                "tone": next_segment.tone,
-                "portrait": next_segment.portrait,
-            },
-        )
-        self.prepared_next_tts = self.tts_provider.prepare(
-            next_segment.text,
-            next_segment.tone,
-        )
-
-    def _take_prepared_tts_for_segment(
-        self,
-        segment: ChatSegment,
-    ) -> TTSPreparedAudio | None:
-        if self.prepared_next_segment is not segment:
-            return None
-
-        prepared_tts = self.prepared_next_tts
-        self.prepared_next_segment = None
-        self.prepared_next_tts = None
-        return prepared_tts
-
-    def _discard_prepared_next_tts(self) -> None:
-        if self.prepared_next_tts is not None:
-            self.tts_provider.discard_prepared(self.prepared_next_tts)
-        self.prepared_next_segment = None
-        self.prepared_next_tts = None
-
-    def _restart_current_segment_speech(self) -> None:
-        if self.current_segment_sequence_id is None or self.current_segment is None:
-            return
-
-        self.reply_advance_token += 1
-        self.current_segment_speech_done = False
-        self.reply_advance_scheduled = False
-        self.set_speech(self.current_segment.display_text(self.subtitle_language))
+        self.subtitle_controller.show_segments(segments)
 
     def _load_subtitle_language(self) -> str:
         try:
@@ -2375,17 +1962,15 @@ class PetWindow(QWidget):
     def _apply_character(self, profile: CharacterProfile) -> None:
         previous_character_id = self.character_profile.id
         self.character_profile = profile
-        self.portrait_path = profile.default_portrait_path
         self.system_prompt = load_character_system_prompt(profile)
         self.agent_runtime.update_character(self.system_prompt, profile.reply_tones, profile.portrait_choices)
         self.setWindowTitle(profile.display_name)
         self.name_label.setText(profile.display_name)
         self.input_edit.setPlaceholderText(f"和{profile.display_name}说点什么...")
-        self.pixmap = self._load_portrait()
-        self._apply_portrait()
+        portrait_pixmap = self.portrait_controller.set_profile(profile)
         if hasattr(self, "tray_icon"):
             self.tray_icon.setToolTip(profile.display_name)
-            self.tray_icon.setIcon(QIcon(self.pixmap) if not self.pixmap.isNull() else QIcon())
+            self.tray_icon.setIcon(QIcon(portrait_pixmap) if not portrait_pixmap.isNull() else QIcon())
 
         self.history_store = self._create_history_store(profile)
         self.visual_observation_store = self._create_visual_observation_store(profile)
@@ -2394,11 +1979,7 @@ class PetWindow(QWidget):
 
         if profile.id != previous_character_id:
             self.messages = []
-            self.reply_sequence_id += 1
-            self.pending_reply_segments = []
-            self.queued_reply_segment_batches = []
-            self._reset_current_segment_progress()
-            self.set_speech(profile.initial_message)
+            self.subtitle_controller.cancel_reply_flow(profile.initial_message)
 
     def _create_history_store(self, profile: CharacterProfile) -> ChatHistoryStore:
         history_path = self.base_dir / "data" / "chat_history" / f"{profile.id}.jsonl"
