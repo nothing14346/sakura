@@ -403,6 +403,18 @@ def _process_events_until(app, predicate, timeout_ms: int = 1500):  # type: igno
     return predicate()
 
 
+def test_settings_dialog_formats_memory_time_as_local_timezone() -> None:
+    from app.ui.settings_dialog import _format_memory_time
+
+    utc_time = "2026-06-01T18:42:27Z"
+    expected = datetime.fromisoformat("2026-06-01T18:42:27+00:00").astimezone().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    assert _format_memory_time(utc_time) == expected
+    assert _format_memory_time("2026-06-02T02:42:27+08:00") == expected
+
+
 def test_settings_dialog_loads_memory_on_open_in_background() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")

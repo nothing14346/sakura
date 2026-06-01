@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
@@ -1226,7 +1227,16 @@ def _memory_row_background_color(row: int, checked: bool) -> str:
 
 
 def _format_memory_time(value: str) -> str:
-    text = value.replace("T", " ").replace("Z", "")
-    for separator in ("+", "."):
-        text = text.split(separator, 1)[0]
-    return text
+    text = value.strip()
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        legacy_text = text.replace("T", " ").replace("Z", "")
+        for separator in ("+", "."):
+            legacy_text = legacy_text.split(separator, 1)[0]
+        return legacy_text
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone()
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")

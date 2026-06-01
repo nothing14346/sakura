@@ -23,6 +23,12 @@ DEFAULT_COLLECTION_NAME = "sakura_memories"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_EMBEDDING_DIMS = 384
 DEFAULT_MEMORY_LIMIT = 20
+DEFAULT_MEMORY_LANGUAGE_INSTRUCTIONS = (
+    "Sakura 的长期记忆必须使用简体中文记录。"
+    "无论用户或助手消息使用什么语言，都要把可记忆事实翻译、归纳为自然的简体中文；"
+    "技术名词、代码标识符、专有名词、路径、ID 和品牌名可保留原文。"
+    "输出 JSON 结构不变，只改变 memory/text 字段的自然语言内容。"
+)
 
 
 def install_mem0_vendor() -> Path:
@@ -211,6 +217,7 @@ class MemoryStore:
                 },
             },
             "history_db_path": str(memory_dir / "mem0_history.db"),
+            "custom_instructions": DEFAULT_MEMORY_LANGUAGE_INSTRUCTIONS,
         }
 
     def summary(self, limit: int = 12) -> str:

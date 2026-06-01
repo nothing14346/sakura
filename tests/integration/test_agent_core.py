@@ -332,6 +332,8 @@ def test_memory_store_builds_local_mem0_config() -> None:
     assert config["llm"]["config"]["api_key"] == "test-key"
     assert config["llm"]["config"]["openai_base_url"] == "https://api.example.com/v1"
     assert config["embedder"]["provider"] == "huggingface"
+    assert "简体中文" in config["custom_instructions"]
+    assert "memory/text" in config["custom_instructions"]
 
 
 def test_memory_store_reuses_runtime_when_api_settings_unchanged() -> None:
