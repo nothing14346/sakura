@@ -1830,6 +1830,27 @@ def test_reply_history_segments_load_from_persisted_history_entries() -> None:
     ]
 
 
+def test_reply_history_segments_recover_json_string_history_entry() -> None:
+    from app.storage.chat_history import ChatHistoryEntry
+    from app.ui.pet_window import _reply_history_segments_from_entries
+
+    segments = _reply_history_segments_from_entries(
+        [
+            ChatHistoryEntry(
+                "2026-06-01T10:00:01+08:00",
+                "assistant",
+                '{"segments":[{"ja":"一つ目。","zh":"第一段。","tone":"中性","portrait":"站立待机"},'
+                '{"ja":"二つ目。","zh":"第二段。","tone":"请求","portrait":"伸手命令"}]}',
+            ),
+        ]
+    )
+
+    assert segments == [
+        ChatSegment("一つ目。", "中性", "第一段。", "站立待机"),
+        ChatSegment("二つ目。", "请求", "第二段。", "伸手命令"),
+    ]
+
+
 def test_reply_history_reload_uses_history_store_entries() -> None:
     from app.storage.chat_history import ChatHistoryEntry
     from app.ui.pet_window import PetWindow

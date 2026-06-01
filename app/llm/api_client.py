@@ -16,6 +16,7 @@ from app.llm.prompt_templates import build_segmented_reply_instruction
 
 MAX_API_RETRY_ATTEMPTS = 3
 API_RETRY_DELAY_SECONDS = 0.8
+STRUCTURED_JSON_RESPONSE_FORMAT = {"type": "json_object"}
 ChatMessage = dict[str, Any]
 SUPPORTED_CHAT_COMPLETION_PARAMS = {
     "temperature",
@@ -88,7 +89,7 @@ class OpenAICompatibleClient:
             "temperature": 0,
             "max_tokens": 8,
         }
-        data = self._post_chat_completions(payload)
+        data = self._post_chat_completions_with_response_format_fallback(payload)
 
         try:
             content = data["choices"][0]["message"]["content"]
@@ -109,6 +110,7 @@ class OpenAICompatibleClient:
             f"{system_prompt.strip()}\n\n{segmented_reply_instruction}",
             messages,
             temperature=0.8,
+            response_format=STRUCTURED_JSON_RESPONSE_FORMAT,
         )
 
         reply = parse_chat_reply(content)
@@ -155,7 +157,7 @@ class OpenAICompatibleClient:
                 "chat_params": _filter_supported_chat_params(chat_params),
             },
         )
-        data = self._post_chat_completions(payload)
+        data = self._post_chat_completions_with_response_format_fallback(payload)
 
         try:
             content = data["choices"][0]["message"]["content"]
@@ -174,6 +176,7 @@ class OpenAICompatibleClient:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = "auto",
         temperature: float = 0.8,
+        structured_response: bool = False,
         **chat_params: Any,
     ) -> ChatCompletionTurn:
         """调用 OpenAI 原生 tools/tool_calls 协议并返回 assistant 消息。"""
@@ -182,6 +185,8 @@ class OpenAICompatibleClient:
         if tools:
             chat_params["tools"] = tools
             chat_params["tool_choice"] = tool_choice
+        if structured_response and "response_format" not in chat_params:
+            chat_params["response_format"] = STRUCTURED_JSON_RESPONSE_FORMAT
         payload = _build_chat_completion_payload(
             model=self.settings.model,
             system_prompt=system_prompt,
@@ -204,7 +209,7 @@ class OpenAICompatibleClient:
                 "chat_params": _filter_supported_chat_params(chat_params),
             },
         )
-        data = self._post_chat_completions(payload)
+        data = self._post_chat_completions_with_response_format_fallback(payload)
 
         try:
             raw_message = data["choices"][0]["message"]
@@ -232,6 +237,24 @@ class OpenAICompatibleClient:
             tool_calls=tool_calls,
             message=normalized_message,
         )
+
+    def _post_chat_completions_with_response_format_fallback(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            return self._post_chat_completions(payload)
+        except ApiRequestError as exc:
+            if "response_format" not in payload or not _is_response_format_unsupported_error(exc):
+                raise
+            fallback_payload = dict(payload)
+            fallback_payload.pop("response_format", None)
+            debug_log(
+                "API",
+                "结构化 response_format 不受支持，已回退普通请求",
+                {"error": str(exc)},
+            )
+            return self._post_chat_completions(fallback_payload)
 
     def _ensure_chat_config(self, api_key_message: str) -> None:
         if not self.settings.api_key:
@@ -405,6 +428,11 @@ def _filter_supported_chat_params(params: dict[str, Any]) -> dict[str, Any]:
             continue
         filtered[key] = value
     return filtered
+
+
+def _is_response_format_unsupported_error(exc: ApiRequestError) -> bool:
+    text = str(exc).lower()
+    return "response_format" in text or "json_object" in text or "json schema" in text
 
 
 def _parse_native_tool_calls(raw_tool_calls: Any) -> list[NativeToolCall]:

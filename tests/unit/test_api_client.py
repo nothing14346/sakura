@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.llm.api_client import (
+    ApiRequestError,
     ApiSettings,
     OpenAICompatibleClient,
     _build_segmented_reply_instruction,
@@ -74,6 +75,55 @@ def test_complete_raw_applies_param_filter(monkeypatch) -> None:  # type: ignore
     assert "unsupported_internal_flag" not in captured
 
 
+def test_complete_raw_requests_structured_json_by_default_for_chat(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    captured: dict[str, Any] = {}
+    client = OpenAICompatibleClient(
+        ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="key",
+            model="model",
+        )
+    )
+
+    def fake_post(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.update(payload)
+        return {"choices": [{"message": {"content": '{"segments":[{"ja":"うん。","zh":"嗯。"}]}'}}]}
+
+    monkeypatch.setattr(client, "_post_chat_completions", fake_post)
+
+    client.chat("system", [{"role": "user", "content": "hello"}])
+
+    assert captured["response_format"] == {"type": "json_object"}
+
+
+def test_response_format_falls_back_when_provider_rejects(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[dict[str, Any]] = []
+    client = OpenAICompatibleClient(
+        ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="key",
+            model="model",
+        )
+    )
+
+    def fake_post(payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append(dict(payload))
+        if "response_format" in payload:
+            raise ApiRequestError("unsupported response_format json_object")
+        return {"choices": [{"message": {"content": "OK"}}]}
+
+    monkeypatch.setattr(client, "_post_chat_completions", fake_post)
+
+    assert client.complete_raw(
+        "system",
+        [{"role": "user", "content": "hello"}],
+        response_format={"type": "json_object"},
+    ) == "OK"
+
+    assert "response_format" in calls[0]
+    assert "response_format" not in calls[1]
+
+
 def test_complete_with_tools_sends_tools_and_parses_tool_calls(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     captured: dict[str, Any] = {}
     client = OpenAICompatibleClient(
@@ -132,6 +182,31 @@ def test_complete_with_tools_sends_tools_and_parses_tool_calls(monkeypatch) -> N
     assert turn.message["tool_calls"][0]["id"] == "call_1"
 
 
+def test_complete_with_tools_can_request_structured_json(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    captured: dict[str, Any] = {}
+    client = OpenAICompatibleClient(
+        ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="key",
+            model="model",
+        )
+    )
+
+    def fake_post(payload: dict[str, Any]) -> dict[str, Any]:
+        captured.update(payload)
+        return {"choices": [{"message": {"role": "assistant", "content": '{"segments":[]}'}}]}
+
+    monkeypatch.setattr(client, "_post_chat_completions", fake_post)
+
+    client.complete_with_tools(
+        "system",
+        [{"role": "user", "content": "hello"}],
+        structured_response=True,
+    )
+
+    assert captured["response_format"] == {"type": "json_object"}
+
+
 def test_segmented_reply_instruction_requests_portrait_field() -> None:
     instruction = _build_segmented_reply_instruction(
         ["中性", "请求"],
@@ -148,3 +223,37 @@ def test_parse_chat_reply_keeps_segment_portrait() -> None:
     )
 
     assert reply.segments[0].portrait == "站立待机"
+
+
+def test_parse_chat_reply_fenced_json() -> None:
+    reply = parse_chat_reply(
+        '```json\n{"segments":[{"ja":"うん。","zh":"嗯。","tone":"中性"}]}\n```'
+    )
+
+    assert reply.segments[0].text == "うん。"
+
+
+def test_parse_chat_reply_bad_json_does_not_echo_raw() -> None:
+    reply = parse_chat_reply(
+        '{"segments":[{"ja":"うん。","zh":"这里有 `""` 裸双引号","tone":"中性"}]}'
+    )
+
+    assert reply.segments[0].text != '{"segments":[{"ja":"うん。","zh":"这里有 `""` 裸双引号","tone":"中性"}]}'
+
+
+def test_parse_chat_reply_swaps_chinese_ja_with_japanese_zh() -> None:
+    reply = parse_chat_reply(
+        '{"segments":[{"ja":"原因是 Mermaid 语法。","zh":"原因はマーメイドの構文だよ。","tone":"中性"}]}'
+    )
+
+    assert reply.segments[0].text == "原因はマーメイドの構文だよ。"
+    assert reply.segments[0].translation == "原因是 Mermaid 语法。"
+
+
+def test_parse_chat_reply_replaces_chinese_ja_with_safe_japanese() -> None:
+    reply = parse_chat_reply(
+        '{"segments":[{"ja":"原因是 Mermaid 语法。","zh":"原因是 Mermaid 语法。","tone":"中性"}]}'
+    )
+
+    assert "原因是" not in reply.segments[0].text
+    assert reply.segments[0].translation == "原因是 Mermaid 语法。"

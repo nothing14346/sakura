@@ -23,6 +23,7 @@ from app.agent.screen_observation import (
     SCREEN_OBSERVATION_HISTORY_MARKER,
 )
 from app.storage.chat_history import ChatHistoryEntry, ChatHistoryStore
+from app.llm.chat_reply import parse_chat_reply_result
 
 
 _VISUAL_ID_SUFFIX_RE = re.compile(r"，视觉记录\s+visual_id=[^\]\s]+")
@@ -409,8 +410,16 @@ def _entry_view_model(
         align=align,
         bubble_object_name=bubble_object_name,
         meta_text=f"{role_name} · {time_text}",
-        content=_humanize_history_content(entry.display_content(subtitle_language)),
+        content=_humanize_history_content(_entry_display_content(entry, subtitle_language)),
     )
+
+
+def _entry_display_content(entry: ChatHistoryEntry, subtitle_language: str) -> str:
+    if entry.role == "assistant":
+        parsed = parse_chat_reply_result(entry.content.strip())
+        if not parsed.needs_retry and parsed.reply.text != entry.content.strip():
+            return parsed.reply.display_text(subtitle_language)
+    return entry.display_content(subtitle_language)
 
 
 def _role_style(role: str, assistant_name: str) -> tuple[str, str, str]:

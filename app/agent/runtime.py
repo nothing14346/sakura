@@ -31,7 +31,7 @@ from app.llm.api_client import (
     is_vision_unsupported_error,
     messages_contain_image,
 )
-from app.llm.chat_reply import ChatReply, parse_chat_reply
+from app.llm.chat_reply import ChatReply, parse_chat_reply, parse_chat_reply_result
 from app.core.debug_log import debug_log, summarize_messages
 from app.agent.runtime_limits import (
     MAX_AGENT_STEPS_PER_TURN,
@@ -92,6 +92,60 @@ class AgentRuntime:
     def set_autonomous_screen_observation_enabled(self, enabled: bool) -> None:
         """允许模型在对话或主动事件中自主决定是否观察屏幕。"""
         self.autonomous_screen_observation_enabled = enabled
+
+    def _parse_final_reply_with_retry(
+        self,
+        system_prompt: str,
+        working_messages: list[ChatMessage],
+        raw_content: str,
+    ) -> ChatReply:
+        """最终回复结构不合格时，只重试一次格式修复，避免坏 JSON 进入 UI。"""
+        parsed = parse_chat_reply_result(raw_content)
+        if not parsed.needs_retry:
+            return parsed.reply
+
+        debug_log(
+            "AgentRuntime",
+            "最终回复结构异常，准备请求模型修复",
+            {"reason": parsed.reason, "raw_content": raw_content},
+        )
+        repair_messages: list[ChatMessage] = [
+            *working_messages,
+            {"role": "assistant", "content": raw_content},
+            {
+                "role": "user",
+                "content": (
+                    "上一条 assistant 输出不是合格的 Sakura 回复 JSON。"
+                    "请只把上一条内容修复为合法 JSON，不新增事实、不解释、不使用 Markdown。"
+                    "格式必须是 {\"segments\":[{\"ja\":\"自然日语\",\"zh\":\"中文译文\","
+                    "\"tone\":\"中性\",\"portrait\":\"站立待机\"}]}。"
+                    "ja 字段只能写自然日语，不能包含中文。"
+                ),
+            },
+        ]
+        try:
+            repaired_turn = self.api_client.complete_with_tools(
+                system_prompt,
+                repair_messages,
+                tools=[],
+                tool_choice="none",
+                temperature=0.2,
+                structured_response=True,
+            )
+        except ApiRequestError as exc:
+            debug_log("AgentRuntime", "最终回复修复请求失败，使用安全兜底", {"error": str(exc)})
+            return parsed.reply
+
+        repaired = parse_chat_reply_result(repaired_turn.content)
+        if repaired.needs_retry:
+            debug_log(
+                "AgentRuntime",
+                "最终回复修复后仍不合格，使用安全兜底",
+                {"reason": repaired.reason, "raw_content": repaired_turn.content},
+            )
+            return parsed.reply
+        debug_log("AgentRuntime", "最终回复结构修复成功", {"repaired": repaired.repaired})
+        return repaired.reply
 
     def handle_user_message(
         self,
@@ -190,6 +244,7 @@ class AgentRuntime:
                     tools=tool_defs,
                     tool_choice="auto",
                     temperature=0.8,
+                    structured_response=True,
                 )
             except ApiRequestError as exc:
                 if messages_contain_image(working_messages) and is_vision_unsupported_error(exc):
@@ -223,7 +278,11 @@ class AgentRuntime:
                     },
                 )
                 return AgentResult(
-                    reply=parse_chat_reply(turn.content),
+                    reply=self._parse_final_reply_with_retry(
+                        system_prompt,
+                        working_messages,
+                        turn.content,
+                    ),
                     actions=emitted_actions,
                 )
 

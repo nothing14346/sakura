@@ -59,7 +59,7 @@ from app.config.character_loader import (
     load_character_system_prompt,
 )
 from app.storage.chat_history import ChatHistoryEntry, ChatHistoryStore
-from app.llm.chat_reply import ChatReply, ChatSegment
+from app.llm.chat_reply import ChatReply, ChatSegment, parse_chat_reply_result
 from app.llm.context_trimming import trim_messages_for_model
 from app.core.chat_worker import ChatWorker, EventWorker
 from app.core.debug_log import debug_log, summarize_messages
@@ -2578,6 +2578,10 @@ def _reply_history_segments_from_entries(entries: list[ChatHistoryEntry]) -> lis
     segments: list[ChatSegment] = []
     for entry in entries:
         if entry.role != "assistant" or not entry.content.strip():
+            continue
+        recovered = parse_chat_reply_result(entry.content.strip())
+        if not recovered.needs_retry and len(recovered.reply.segments) > 1:
+            segments.extend(recovered.reply.segments)
             continue
         tone = entry.tone.strip()
         if tone:

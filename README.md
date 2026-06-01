@@ -48,12 +48,12 @@
 
 ```mermaid
 flowchart LR
-    A["main.py"] --> B["data/config/*.yaml"]<br>配置
+    A["main.py"] --> B["data/config/*.yaml<br/>配置"]
     A --> C["CharacterRegistry"]
-    C --> D["characters/sakura/character.json"]<br>角色包
-    A --> E["OpenAICompatibleClient"]<br>API 客户端
+    C --> D["characters/sakura/character.json<br/>角色包"]
+    A --> E["OpenAICompatibleClient<br/>API 客户端"]
     B --> E
-    E --> F["AgentRuntime"]<br>Agent 决策层
+    E --> F["AgentRuntime<br/>Agent 决策层"]
     F --> G["ToolRegistry"]
     G --> H["内置工具 + MCP 工具 + 插件工具"]
     A --> I["TTSProvider"]

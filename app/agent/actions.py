@@ -33,7 +33,7 @@ class AgentProgress:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class PendingToolAction:
     """等待用户确认后才执行的工具动作。"""
 
@@ -45,6 +45,36 @@ class PendingToolAction:
     tool_call_id: str = ""
     continuation_messages: list[dict[str, Any]] = field(default_factory=list)
 
+    def __init__(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        reason: str,
+        *,
+        id: str = "",
+        created_at: str = "",
+        tool_call_id: str = "",
+        continuation_messages: list[dict[str, Any]] | None = None,
+        risk: str = "",
+    ) -> None:
+        """兼容旧调用点；risk 已迁移到 Tool 元数据，这里只忽略保留入参。"""
+        del risk
+        object.__setattr__(self, "id", id.strip() or uuid.uuid4().hex[:8])
+        object.__setattr__(self, "tool_name", tool_name)
+        object.__setattr__(self, "arguments", dict(arguments))
+        object.__setattr__(self, "reason", reason)
+        object.__setattr__(
+            self,
+            "created_at",
+            created_at.strip() or datetime.now().astimezone().isoformat(timespec="seconds"),
+        )
+        object.__setattr__(self, "tool_call_id", tool_call_id.strip())
+        object.__setattr__(
+            self,
+            "continuation_messages",
+            [dict(message) for message in (continuation_messages or []) if isinstance(message, dict)],
+        )
+
     @classmethod
     def create(
         cls,
@@ -54,10 +84,10 @@ class PendingToolAction:
         tool_call_id: str = "",
     ) -> "PendingToolAction":
         return cls(
-            id=uuid.uuid4().hex[:8],
             tool_name=tool_name,
             arguments=dict(arguments),
             reason=reason,
+            id=uuid.uuid4().hex[:8],
             created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
             tool_call_id=tool_call_id.strip(),
         )

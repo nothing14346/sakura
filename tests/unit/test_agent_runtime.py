@@ -279,6 +279,43 @@ class TestAgentRuntimeBasics:
         runtime.set_model_vision_enabled(False)
         assert not runtime.model_vision_enabled
 
+    def test_final_reply_retries_once_when_json_invalid(self) -> None:
+        client = _dummy_api_client()
+        client.complete_with_tools.side_effect = [
+            MagicMock(
+                content='{"segments":[{"ja":"原因是 Mermaid 语法。","zh":"原因是 Mermaid 语法。"}]}',
+                tool_calls=[],
+            ),
+            MagicMock(
+                content=json.dumps(
+                    {"segments": [{"ja": "直したよ。", "zh": "修好了。", "tone": "中性"}]},
+                    ensure_ascii=False,
+                ),
+                tool_calls=[],
+            ),
+        ]
+        runtime = AgentRuntime(client, _dummy_system_prompt())
+
+        result = runtime.handle_user_message([ChatMessage(role="user", content="hello")])
+
+        assert client.complete_with_tools.call_count == 2
+        assert result.reply.segments[0].text == "直したよ。"
+
+    def test_final_reply_uses_safe_fallback_when_retry_still_invalid(self) -> None:
+        client = _dummy_api_client()
+        bad_content = '{"segments":[{"ja":"原因是 Mermaid 语法。","zh":"原因是 Mermaid 语法。"}]}'
+        client.complete_with_tools.side_effect = [
+            MagicMock(content=bad_content, tool_calls=[]),
+            MagicMock(content=bad_content, tool_calls=[]),
+        ]
+        runtime = AgentRuntime(client, _dummy_system_prompt())
+
+        result = runtime.handle_user_message([ChatMessage(role="user", content="hello")])
+
+        assert client.complete_with_tools.call_count == 2
+        assert result.reply.segments[0].text != bad_content
+        assert "segments" not in result.reply.segments[0].text
+
     def test_update_character_preserves_tools(self) -> None:
         tool = _dummy_tool("my_tool")
         registry = ToolRegistry([tool])
