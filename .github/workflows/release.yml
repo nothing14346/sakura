@@ -150,8 +150,10 @@ jobs:
         shell: bash
         run: |
           curl -fL -o runtime/get-pip.py https://bootstrap.pypa.io/get-pip.py
+          # 取消注释 import site，使 pip 和 site-packages 可用（embed 默认是注释掉的）
+          sed -i 's/^#import site/import site/' runtime/python312._pth
           ./runtime/python.exe runtime/get-pip.py --no-warn-script-location
-          # Python 3.12 embed 默认已启用 import site，追加 .. 让 Python 能找到项目根目录的 app 模块
+          # 追加 .. 让 Python 能找到项目根目录的 app 模块
           echo '..' >> runtime/python312._pth
 
       - name: Setup pip (macOS)
@@ -175,7 +177,7 @@ jobs:
       - name: Tidy Windows bundle layout
         if: matrix.platform == 'windows-x64'
         shell: bash
-        run: rm -f install.command start.command
+        run: rm -f install.command start.command python-embed.zip
 
       - name: Create runtime archive (Windows)
         if: matrix.platform == 'windows-x64'
@@ -185,7 +187,7 @@ jobs:
       - name: Create bundle archive (Windows)
         if: matrix.platform == 'windows-x64'
         shell: pwsh
-        run: Compress-Archive -Path * -DestinationPath "${{ matrix.artifact }}" -Force
+        run: Compress-Archive -Path * -Exclude "python-embed.zip", "${{ matrix.runtime_artifact }}" -DestinationPath "${{ matrix.artifact }}" -Force
 
       - name: Create runtime archive (macOS)
         if: matrix.platform != 'windows-x64'
