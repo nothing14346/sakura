@@ -31,6 +31,27 @@ llm:
   timeout_seconds: 60
 ```
 
+## Character Packs
+
+Character packs (portraits, personality cards, voice resources) bring the pet to life. The project ships with a default character; additional ones are available from:
+
+- **[GitHub Releases](https://github.com/Rvosy/sakura/releases)**: Download character pack zips (e.g. `mia.zip`) from the latest Release Assets.
+- **[Baidu Netdisk](https://pan.baidu.com/s/1LnO25Ec2rezOnopjgX_OkQ?pwd=0721)**: Passcode `0721`, contains all published character packs.
+
+### Installation
+
+1. Download a character pack zip.
+2. Extract it into the project root **`characters`** directory.
+3. Ensure the structure is `characters/<id>/character.json` (one folder per character).
+4. Restart the app — it auto-scans and loads new characters.
+
+> Example: extracting `mia.zip` should yield `characters/mia/character.json`, `characters/mia/card.md`, `characters/mia/portraits/`, etc.
+
+### Switching Characters
+
+Right-click the pet or tray icon → Settings → pick a character from the list → Save.
+
+
 ## Project Structure
 
 ```
