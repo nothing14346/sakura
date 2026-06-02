@@ -16,6 +16,48 @@
 
 ![Sakura 桌宠预览](_pet_style_preview.png)
 
+## 🚀 新手教程（零基础也能用）
+
+**不需要会编程。** 只需三步，就能让你的桌宠活过来喵~
+
+### 第一步：安装依赖
+
+`runtime` 文件夹自带了 Python，但依赖包还是要装一次：
+
+- **Windows 用户：** 双击 `install.bat`，等待完成（约 5-15 分钟）。
+- **Mac / Linux 用户：** 打开终端，进入项目目录，运行 `bash scripts/install.sh`。
+
+> 如果是直接拉取的源码, 需要先从Release页面下载预编译的依赖包（`runtime` 文件夹），放到项目根目录的 `runtime` 文件夹，再运行安装脚本。
+> 不管下载的是 Release 包还是 GitHub 源码，这一步都要做。装完命令行窗口会自动关闭。
+
+### 第二步：获取 API Key
+
+桌宠需要一个「AI 大脑」才能说话，你需要一个 API Key。就像给手机插 SIM 卡才能上网一样。
+
+1. **获取 API Key。** 可以从以下任一渠道获得：
+   - 国内中转站如 [GemAI](https://api.gemai.cc/register?aff=rwbQ) (有便宜且按次计费的 gemini-flash 系列模型)
+   - 其他任何兼容 OpenAI 接口格式的服务
+
+> **🚫 目前不要使用 DeepSeek 系列模型！**
+>
+> Sakura 的很多功能（屏幕观察、图像识别等）直接依赖模型的多模态能力（视觉理解），而 DeepSeek 系列模型不具备多模态能力，使用后会导致桌宠无法正常观察屏幕、识别图像等功能失效。
+>
+> 请选择支持视觉/多模态的模型，例如 Gemini Flash 等。
+
+### 第三步：一键启动
+
+- **Windows 用户：** 双击项目根目录的 **`start.bat`**
+- **Mac / Linux 用户：** 在终端里运行 `bash scripts/start.sh`
+
+- **右键** 桌宠或托盘图标可以打开菜单（设置、聊天记录等）
+- 在设置里可以切换模式：聊天模式 / Agent 模式 / 静默模式等
+- 关掉窗口即可退出
+
+以下内容面向想深入了解架构或做开发的用户。如果你是纯用来玩的，到这里就够啦~
+
+---
+
+
 ## 设计思路
 
 用户的每一句话先进入 **DecisionLayer** 做路由判断：是随口聊天、是在看屏幕、还是要执行工具任务？角色表达层的回复和 Agent 层的工具执行是完全分离的——Agent 做完事情后，结果交给角色层用 Sakura 的语气转述出来，而不是直接向用户抛出一行命令行输出。
@@ -186,39 +228,7 @@ flowchart LR
 └── tools/mcp/                          # MCP Server 运行时
 ```
 
-## 快速开始
-
-**前置要求：** Python 3.10+。
-
-```powershell
-# 1. 创建并激活虚拟环境
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-# 2. 安装依赖
-pip install -r requirements.txt
-
-# 3. 编辑配置（至少填入 API Key）
-# 编辑 data/config/api.yaml，修改 llm.api_key 和 llm.base_url
-notepad data/config/api.yaml
-
-# 4. 启动桌宠
-python main.py
-```
-
-**最低配置 `data/config/api.yaml`：**
-
-```yaml
-llm:
-  base_url: https://api.openai.com/v1
-  api_key: your_api_key_here
-  model: gpt-4.1-mini
-  timeout_seconds: 60
-```
-
-启动后，你应该能在屏幕右下附近看到夜乃桜。右键桌宠或托盘图标可以打开设置、历史记录等菜单。
-
-## 可选语音配置
+## 可选：语音配置
 
 语音默认关闭。需要自行启动兼容以下接口的本地 GPT-SoVITS API：
 
