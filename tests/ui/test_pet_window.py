@@ -879,9 +879,16 @@ def test_settings_dialog_import_character_archive_refreshes_combo(monkeypatch) -
         lambda *_args, **_kwargs: (str(archive_path), ""),
     )
     monkeypatch.setattr(settings_dialog_module.QMessageBox, "information", lambda *_args, **_kwargs: None)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        settings_dialog_module.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message),
+    )
 
     dialog._import_character_archive()
 
+    assert warnings == []
     assert dialog.character_combo.currentData() == "nanami"
     assert dialog._selected_character_profile().display_name == "Nanami"
 
@@ -1169,7 +1176,7 @@ def test_settings_dialog_memory_loader_thread_is_not_dialog_child() -> None:
     )
 
     try:
-        assert memory_store.started.wait(1.5)
+        assert _process_events_until(app, lambda: memory_store.started.is_set())
         assert dialog._memory_list_thread is not None
         assert dialog._memory_list_thread.parent() is None
     finally:

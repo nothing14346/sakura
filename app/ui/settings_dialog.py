@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -745,9 +745,11 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.memory_editor_container)
         tab.setLayout(layout)
 
-        self._show_memory_placeholder(MEMORY_READING_TEXT)
+        loading_text = self._memory_loading_text()
+        self.memory_status_label.setText(loading_text)
+        self._show_memory_placeholder(loading_text)
         self._clear_memory_editor()
-        self._load_memory_entries()
+        QTimer.singleShot(0, self._load_memory_entries)
         return tab
 
     def _load_memory_entries(self) -> None:
