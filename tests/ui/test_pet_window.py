@@ -3103,6 +3103,104 @@ def test_pet_window_toggle_always_on_top_saves_and_applies() -> None:
     assert window.raise_count == 1
 
 
+def test_pet_window_apply_window_flags_syncs_native_topmost_state() -> None:
+    from app.ui.pet_window import PetWindow
+
+    class MinimalWindow:
+        _apply_window_flags = PetWindow._apply_window_flags
+
+        def __init__(self) -> None:
+            self.visible = True
+            self.show_count = 0
+            self.sync_count = 0
+            self.applied_flags = None
+
+        def isVisible(self) -> bool:
+            return self.visible
+
+        def _window_flags(self):  # type: ignore[no-untyped-def]
+            return "flags"
+
+        def setWindowFlags(self, flags) -> None:  # type: ignore[no-untyped-def]
+            self.applied_flags = flags
+
+        def show(self) -> None:
+            self.show_count += 1
+
+        def _sync_native_topmost_state(self) -> None:
+            self.sync_count += 1
+
+    window = MinimalWindow()
+
+    window._apply_window_flags()
+
+    assert window.applied_flags == "flags"
+    assert window.show_count == 1
+    assert window.sync_count == 1
+
+
+def test_pet_window_apply_window_flags_does_not_sync_native_state_before_visible() -> None:
+    from app.ui.pet_window import PetWindow
+
+    class MinimalWindow:
+        _apply_window_flags = PetWindow._apply_window_flags
+
+        def __init__(self) -> None:
+            self.show_count = 0
+            self.sync_count = 0
+
+        def isVisible(self) -> bool:
+            return False
+
+        def _window_flags(self):  # type: ignore[no-untyped-def]
+            return "flags"
+
+        def setWindowFlags(self, _flags) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def show(self) -> None:
+            self.show_count += 1
+
+        def _sync_native_topmost_state(self) -> None:
+            self.sync_count += 1
+
+    window = MinimalWindow()
+
+    window._apply_window_flags()
+
+    assert window.show_count == 0
+    assert window.sync_count == 0
+
+
+def test_pet_window_context_menu_resyncs_topmost_after_menu_closes() -> None:
+    from app.ui.pet_window import PetWindow
+
+    class MenuStub:
+        def __init__(self, events: list[str]) -> None:
+            self.events = events
+
+        def exec(self, _position) -> None:  # type: ignore[no-untyped-def]
+            self.events.append("exec")
+
+    class MinimalWindow:
+        _show_context_menu = PetWindow._show_context_menu
+
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def _build_menu(self) -> MenuStub:
+            return MenuStub(self.events)
+
+        def _sync_native_topmost_state(self) -> None:
+            self.events.append("sync")
+
+    window = MinimalWindow()
+
+    window._show_context_menu(object())  # type: ignore[arg-type]
+
+    assert window.events == ["exec", "sync"]
+
+
 def test_screen_observation_followup_uses_last_user_message_after_progress(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from app.agent import AgentAction, AgentResult
     from app.llm.chat_reply import parse_chat_reply

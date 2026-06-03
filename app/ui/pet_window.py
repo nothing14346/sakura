@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -790,6 +791,7 @@ class PetWindow(QWidget):
     def _show_context_menu(self, position: QPoint) -> None:
         _ = position
         self._build_menu().exec(QCursor.pos())
+        self._sync_native_topmost_state()
 
     def _handle_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -2649,6 +2651,25 @@ class PetWindow(QWidget):
         self.setWindowFlags(self._window_flags())
         if was_visible:
             self.show()
+            self._sync_native_topmost_state()
+
+    def _sync_native_topmost_state(self) -> None:
+        if sys.platform != "win32" or not self.isVisible():
+            return
+        try:
+            import ctypes
+
+            hwnd = int(self.winId())
+            hwnd_topmost = -1
+            hwnd_notopmost = -2
+            swp_no_size = 0x0001
+            swp_no_move = 0x0002
+            swp_no_activate = 0x0010
+            insert_after = hwnd_topmost if self.always_on_top_enabled else hwnd_notopmost
+            flags = swp_no_size | swp_no_move | swp_no_activate
+            ctypes.windll.user32.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags)
+        except Exception as exc:  # noqa: BLE001
+            debug_log("PetWindow", "同步原生置顶状态失败", {"error": str(exc)})
 
     def _apply_portrait_scale_percent(self, portrait_scale_percent: int) -> None:
         self.portrait_scale_percent = normalize_portrait_scale_percent(portrait_scale_percent)
