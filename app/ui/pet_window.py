@@ -1873,6 +1873,13 @@ class PetWindow(QWidget):
             },
         )
         if mode == "history_clear":
+            if result.processed_entries > 0 and result.returned == 0:
+                QMessageBox.warning(
+                    self,
+                    "整理失败",
+                    "记忆整理没有写入任何结果，已保留聊天历史。请检查日志后再重试。",
+                )
+                return
             try:
                 self.history_store.clear()
                 self.memory_curation_state.mark_history_cleared()

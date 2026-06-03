@@ -715,9 +715,9 @@ class SettingsDialog(QDialog):
         worker.succeeded.connect(self._handle_memory_load_success)
         worker.failed.connect(self._handle_memory_load_failed)
         worker.finished.connect(thread.quit)
+        worker.finished.connect(self._reset_memory_list_worker)  # 在 worker 结束时立即重置，避免依赖 thread.finished 的多轮事件链
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._reset_memory_list_worker)
 
         self._memory_list_thread = thread
         self._memory_list_worker = worker

@@ -137,8 +137,14 @@ class OpenAILLM(LLMBase):
         if tools:  # TODO: Remove tools if no issues found with new memory addition logic
             params["tools"] = tools
             params["tool_choice"] = tool_choice
-        response = self.client.chat.completions.create(**params)
+        response = self._create_chat_completion_with_response_format_fallback(params)
         parsed_response = self._parse_response(response, tools)
+        if response_format and not tools and not str(parsed_response or "").strip():
+            fallback_params = dict(params)
+            fallback_params.pop("response_format", None)
+            logging.warning("OpenAI-compatible backend returned empty structured response; retrying without response_format")
+            response = self.client.chat.completions.create(**fallback_params)
+            parsed_response = self._parse_response(response, tools)
         if self.config.response_callback:
             try:
                 self.config.response_callback(self, response, params)
@@ -147,3 +153,19 @@ class OpenAILLM(LLMBase):
                 logging.error(f"Error due to callback: {e}")
                 pass
         return parsed_response
+
+    def _create_chat_completion_with_response_format_fallback(self, params):
+        try:
+            return self.client.chat.completions.create(**params)
+        except Exception as e:
+            if "response_format" not in params or not _is_response_format_unsupported_error(e):
+                raise
+            fallback_params = dict(params)
+            fallback_params.pop("response_format", None)
+            logging.warning("OpenAI-compatible backend rejected response_format; retrying without it: %s", e)
+            return self.client.chat.completions.create(**fallback_params)
+
+
+def _is_response_format_unsupported_error(exc):
+    text = str(exc).lower()
+    return "response_format" in text or "json_object" in text or "json schema" in text

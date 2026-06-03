@@ -1550,6 +1550,50 @@ def test_show_settings_saves_and_applies_subtitle_display_speed(monkeypatch) -> 
     assert window.subtitle_controller.display_speeds == [(80, 900)]
 
 
+def test_history_clear_keeps_history_when_memory_curation_returns_nothing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.agent.memory_curator import MemoryCurationResult
+    from app.ui.pet_window import PetWindow
+
+    warnings: list[tuple[str, str]] = []
+
+    class HistoryStoreStub:
+        def __init__(self) -> None:
+            self.clear_calls = 0
+
+        def clear(self) -> None:
+            self.clear_calls += 1
+
+    class MemoryCurationStateStub:
+        def __init__(self) -> None:
+            self.cleared = False
+
+        def mark_history_cleared(self) -> None:
+            self.cleared = True
+
+    class WindowStub:
+        _handle_memory_curation_finished = PetWindow._handle_memory_curation_finished
+
+    window = WindowStub()
+    window.memory_curation_mode = "history_clear"
+    window.memory_curation_target_history_count = 3
+    window.memory_curation_consumed_turns = 0
+    window.history_store = HistoryStoreStub()
+    window.memory_curation_state = MemoryCurationStateStub()
+    window.history_window = None
+
+    monkeypatch.setattr(pet_window_module.QMessageBox, "warning", lambda _parent, title, text: warnings.append((title, text)))
+    monkeypatch.setattr(pet_window_module.QMessageBox, "information", lambda *_args, **_kwargs: None)
+
+    window._handle_memory_curation_finished(
+        MemoryCurationResult(ignored=3, processed_entries=3, returned=0)
+    )
+
+    assert window.history_store.clear_calls == 0
+    assert window.memory_curation_state.cleared is False
+    assert warnings == [("整理失败", "记忆整理没有写入任何结果，已保留聊天历史。请检查日志后再重试。")]
+
+
 def test_show_settings_reloads_memory_in_background_when_api_changes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     import app.ui.pet_window as pet_window_module
     from app.ui.pet_window import PetWindow

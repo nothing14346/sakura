@@ -27,6 +27,9 @@ class MemoryCurationResult:
     archived: int = 0
     ignored: int = 0
     processed_entries: int = 0
+    returned: int = 0
+    unclassified: int = 0
+    event_counts: dict[str, int] | None = None
 
     def summary(self) -> str:
         return (
@@ -121,6 +124,9 @@ class MemoryCurator:
             archived=counts.deleted,
             ignored=counts.ignored,
             processed_entries=len(entries),
+            returned=counts.returned,
+            unclassified=counts.unclassified,
+            event_counts=dict(counts.event_counts),
         )
 
 

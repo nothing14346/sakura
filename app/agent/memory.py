@@ -54,6 +54,9 @@ class MemoryCurationCounts:
     deleted: int = 0
     ignored: int = 0
     total: int = 0
+    returned: int = 0
+    unclassified: int = 0
+    event_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -493,11 +496,14 @@ def _entries_for_mem0(entries: list[ChatHistoryEntry]) -> list[dict[str, str]]:
 def _count_mem0_events(raw: Any, *, total: int) -> MemoryCurationCounts:
     results = _normalize_memory_results(raw)
     counts = MemoryCurationCounts(total=total)
+    counts.returned = len(results)
     if not results:
         counts.ignored = total
         return counts
     for item in results:
         event = str(item.get("event") or item.get("action") or "").upper()
+        event_key = event or "<missing>"
+        counts.event_counts[event_key] = counts.event_counts.get(event_key, 0) + 1
         if event in {"ADD", "CREATE", "CREATED"}:
             counts.created += 1
         elif event in {"UPDATE", "UPDATED"}:
@@ -505,7 +511,8 @@ def _count_mem0_events(raw: Any, *, total: int) -> MemoryCurationCounts:
         elif event in {"DELETE", "ARCHIVE", "DELETED", "ARCHIVED"}:
             counts.deleted += 1
         else:
-            counts.ignored += 1
+            counts.unclassified += 1
+    counts.ignored = max(0, total - counts.created - counts.updated - counts.deleted)
     return counts
 
 

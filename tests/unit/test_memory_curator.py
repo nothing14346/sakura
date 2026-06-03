@@ -84,6 +84,24 @@ def test_memory_entries_ignore_tone_and_portrait_metadata() -> None:
     ]
 
 
+def test_mem0_openai_llm_retries_empty_structured_response() -> None:
+    from mem0.llms.openai import OpenAILLM
+
+    llm = OpenAILLM({"api_key": "test-key", "model": "test-model"})
+    fake_client = FakeOpenAIClient()
+    llm.client = fake_client
+
+    response = llm.generate_response(
+        messages=[{"role": "user", "content": "Return JSON"}],
+        response_format={"type": "json_object"},
+    )
+
+    assert response == '{"memory":[]}'
+    assert len(fake_client.chat.completions.calls) == 2
+    assert "response_format" in fake_client.chat.completions.calls[0]
+    assert "response_format" not in fake_client.chat.completions.calls[1]
+
+
 def _entry(role: str, content: str) -> ChatHistoryEntry:
     return ChatHistoryEntry(
         created_at="2026-05-31T12:00:00+08:00",
@@ -136,3 +154,25 @@ class FakeMem0:
                 }
             ]
         }
+
+
+class FakeOpenAIClient:
+    def __init__(self) -> None:
+        completions = FakeChatCompletions()
+        self.chat = type("FakeChat", (), {"completions": completions})()
+
+
+class FakeChatCompletions:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def create(self, **params):  # type: ignore[no-untyped-def]
+        self.calls.append(params)
+        content = "" if "response_format" in params else '{"memory":[]}'
+        return _fake_openai_response(content)
+
+
+def _fake_openai_response(content: str):  # type: ignore[no-untyped-def]
+    message = type("FakeMessage", (), {"content": content, "tool_calls": None})()
+    choice = type("FakeChoice", (), {"message": message})()
+    return type("FakeResponse", (), {"choices": [choice]})()
