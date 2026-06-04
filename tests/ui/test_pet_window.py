@@ -487,6 +487,158 @@ def test_settings_dialog_disables_proactive_intervals_when_screen_context_disabl
     app.processEvents()
 
 
+def test_settings_dialog_adds_plugin_settings_panel() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QLabel", "QTabWidget")):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui.settings_dialog import SettingsDialog
+    from sdk.types import SettingsPanelContribution
+
+    QApplication = qtwidgets.QApplication
+    QLabel = qtwidgets.QLabel
+    QTabWidget = qtwidgets.QTabWidget
+    app = QApplication.instance() or QApplication([])
+    dialog = SettingsDialog(
+        api_settings=ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="test-key",
+            model="test-model",
+        ),
+        tts_settings=_minimal_tts_settings(),
+        base_dir=Path("."),
+        settings_panel_contributions=[
+            SettingsPanelContribution(
+                section_id="demo",
+                title="Demo 插件",
+                build=lambda parent=None: QLabel("插件设置", parent),
+            )
+        ],
+    )
+
+    tabs = dialog.findChild(QTabWidget)
+    assert tabs is not None
+    assert "插件" in [tabs.tabText(index) for index in range(tabs.count())]
+
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_settings_dialog_manages_plugin_enabled_state() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtcore = pytest.importorskip("PySide6.QtCore")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QTabWidget", "QTableWidget", "QCheckBox")):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.plugins.discovery import PluginDiscovery
+    from app.ui.settings_dialog import SettingsDialog
+
+    QApplication = qtwidgets.QApplication
+    QTableWidget = qtwidgets.QTableWidget
+    QCheckBox = qtwidgets.QCheckBox
+    Qt = qtcore.Qt
+    app = QApplication.instance() or QApplication([])
+    root = _ui_runtime_root("plugin_manager_dialog")
+    plugin_dir = root / "plugins" / "demo"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "plugin.yaml").write_text(
+        """
+api_version: 1
+id: demo
+name: Demo 插件
+description: 用于测试插件管理页。
+version: 1.0.0
+entry: plugin:DemoPlugin
+enabled: true
+priority: 10
+""".strip(),
+        encoding="utf-8",
+    )
+
+    dialog = SettingsDialog(
+        api_settings=ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="test-key",
+            model="test-model",
+        ),
+        tts_settings=_minimal_tts_settings(),
+        base_dir=root,
+        **_settings_dialog_character_kwargs(root),
+        proactive_care_settings=ProactiveCareSettings(screen_context_enabled=True),
+        mcp_settings=MCPRuntimeSettings(windows_enabled=False),
+    )
+
+    table = dialog.findChild(QTableWidget, "pluginManagerTable")
+    assert table is not None
+    assert table.rowCount() == 1
+    assert table.item(0, 1).text() == "Demo 插件"
+    assert table.item(0, 5).text() == "用于测试插件管理页。"
+
+    checkbox = table.cellWidget(0, 0).findChild(QCheckBox)
+    assert checkbox is not None
+    checkbox.setCheckState(Qt.CheckState.Unchecked)
+    dialog.accept()
+
+    specs = PluginDiscovery(root).discover()
+    assert specs[0].plugin_id == "demo"
+    assert specs[0].enabled is False
+    assert dialog.result_plugin_config_changed is True
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_pet_window_syncs_plugin_chat_ui_widgets() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QFrame", "QHBoxLayout", "QLineEdit", "QPushButton")):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui.pet_window import PetWindow
+    from sdk.types import ChatUIWidgetContribution
+
+    QApplication = qtwidgets.QApplication
+    QFrame = qtwidgets.QFrame
+    QHBoxLayout = qtwidgets.QHBoxLayout
+    QLineEdit = qtwidgets.QLineEdit
+    QPushButton = qtwidgets.QPushButton
+    app = QApplication.instance() or QApplication([])
+
+    def build_button(parent=None):  # type: ignore[no-untyped-def]
+        button = QPushButton("插件", parent)
+        button.setObjectName("demoPluginButton")
+        return button
+
+    class PluginManagerStub:
+        chat_ui_widgets = [
+            ChatUIWidgetContribution(
+                widget_id="demo_widget",
+                build=build_button,
+                order=10,
+            )
+        ]
+
+    host = QFrame()
+    host.input_bar = QFrame(host)
+    host.input_edit = QLineEdit(host.input_bar)
+    host.plugin_manager = PluginManagerStub()
+    host.plugin_chat_ui_widget_instances = []
+
+    layout = QHBoxLayout()
+    layout.addWidget(host.input_edit)
+    layout.addWidget(QPushButton("截图", host.input_bar))
+    layout.addWidget(QPushButton("发送", host.input_bar))
+    host.input_bar.setLayout(layout)
+
+    PetWindow._sync_plugin_chat_ui_widgets(host)  # type: ignore[arg-type]
+
+    assert layout.itemAt(1).widget().objectName() == "demoPluginButton"
+
+    host.deleteLater()
+    app.processEvents()
+
+
 def test_settings_dialog_marks_windows_mcp_as_unavailable() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")

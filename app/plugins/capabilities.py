@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from app.plugins.models import (
     ChatUIWidgetContribution,
@@ -14,6 +15,7 @@ from app.plugins.models import (
     ToolContribution,
     ToolsTabContribution,
 )
+from sdk.register import PluginCapabilityRegistry as SDKPluginCapabilityRegistry
 
 
 @dataclass
@@ -56,6 +58,29 @@ class PluginCapabilityRegistry:
 
     def register_prompt_patch(self, contribution: PromptPatchContribution) -> None:
         self.prompt_patches.append(contribution)
+
+    def tool(
+        self,
+        *,
+        name: str,
+        description: str,
+        parameters: dict[str, Any] | None = None,
+        group: str = "default",
+        risk: str = "low",
+        requires_confirmation: bool = False,
+        capability: str | None = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """公开 SDK 的无全局状态工具装饰器兼容入口。"""
+        return SDKPluginCapabilityRegistry.tool(
+            self,
+            name=name,
+            description=description,
+            parameters=parameters,
+            group=group,
+            risk=risk,
+            requires_confirmation=requires_confirmation,
+            capability=capability,
+        )
 
     # 向后兼容: 保持与旧 SDK register_tools_tab 的兼容
     # 旧的 PluginCapabilityRegistry (sdk/register.py) 通过此方法兼容

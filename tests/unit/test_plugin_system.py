@@ -10,11 +10,12 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
+import uuid
 
 import pytest
 
+from app.agent.tool_registry import Tool, ToolRegistry
 from app.plugins import (
     PluginCapabilityRegistry,
     PluginDiscovery,
@@ -30,6 +31,7 @@ from app.plugins.models import (
     ToolContribution,
     ToolsTabContribution,
 )
+from app.plugins.discovery import save_plugin_enabled_overrides
 
 
 class TestPluginSpec:
@@ -85,86 +87,194 @@ class TestPluginCapabilityRegistry:
         assert len(reg.tools) == 0
         assert len(reg.tools_tabs) == 0
 
+    def test_tool_decorator_registers_without_global_state(self) -> None:
+        reg = PluginCapabilityRegistry()
+
+        @reg.tool(name="decorated_tool", description="decorated")
+        def decorated(value: str) -> dict[str, str]:
+            return {"value": value}
+
+        assert decorated("x") == {"value": "x"}
+        assert len(reg.tools) == 1
+        assert reg.tools[0].parameters["required"] == ["value"]
+        assert reg.tools[0].handler({"value": "ok"}) == {"value": "ok"}  # type: ignore[misc]
+
 
 class TestPluginDiscovery:
     """插件发现"""
 
     def test_empty_discover(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir)
-            (base / "data" / "config").mkdir(parents=True)
-            # no plugins.yaml
-            discovery = PluginDiscovery(base)
-            specs = discovery.discover()
-            assert specs == []
+        base = _runtime_root("empty_discover")
+        (base / "data" / "config").mkdir(parents=True)
+        discovery = PluginDiscovery(base)
+        specs = discovery.discover()
+        assert specs == []
 
-    def test_discover_with_config(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir)
-            config_dir = base / "data" / "config"
-            config_dir.mkdir(parents=True)
-            config_dir.joinpath("plugins.yaml").write_text("""
+    def test_discover_manifest_with_config_override(self) -> None:
+        base = _runtime_root("manifest_override")
+        _write_plugin_manifest(base, "demo", priority=40)
+        config_dir = base / "data" / "config"
+        config_dir.mkdir(parents=True)
+        config_dir.joinpath("plugins.yaml").write_text(
+            """
+- id: demo
+  enabled: false
+  priority: 200
+""".strip(),
+            encoding="utf-8",
+        )
+        discovery = PluginDiscovery(base)
+        specs = discovery.discover()
+        assert len(specs) == 1
+        assert specs[0].plugin_id == "demo"
+        assert specs[0].entry == "plugin:DemoPlugin"
+        assert specs[0].description == "demo 插件介绍"
+        assert specs[0].priority == 200
+        assert specs[0].enabled is False
+        assert discovery.discover_enabled() == []
+
+    def test_save_plugin_enabled_overrides(self) -> None:
+        base = _runtime_root("save_enabled_overrides")
+        _write_plugin_manifest(base, "demo", priority=40)
+
+        changed = save_plugin_enabled_overrides(base, {"demo": False})
+        specs = PluginDiscovery(base).discover()
+
+        assert changed
+        assert specs[0].plugin_id == "demo"
+        assert specs[0].enabled is False
+
+    def test_discover_legacy_entry_config(self) -> None:
+        base = _runtime_root("legacy_config")
+        config_dir = base / "data" / "config"
+        config_dir.mkdir(parents=True)
+        config_dir.joinpath("plugins.yaml").write_text(
+            """
 - entry: plugins.a:PluginA
   enabled: true
   priority: 200
 - entry: plugins.b:PluginB
   enabled: false
   priority: 50
-""")
-            discovery = PluginDiscovery(base)
-            specs = discovery.discover()
-            assert len(specs) == 2
-            # 按 priority 降序
-            assert specs[0].priority == 200
-            assert specs[0].enabled is True
+""".strip(),
+            encoding="utf-8",
+        )
+        discovery = PluginDiscovery(base)
+        specs = discovery.discover()
+        assert len(specs) == 2
+        assert specs[0].priority == 200
+        assert specs[0].enabled is True
 
     def test_discover_enabled_only(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir)
-            config_dir = base / "data" / "config"
-            config_dir.mkdir(parents=True)
-            config_dir.joinpath("plugins.yaml").write_text("""
+        base = _runtime_root("enabled_only")
+        config_dir = base / "data" / "config"
+        config_dir.mkdir(parents=True)
+        config_dir.joinpath("plugins.yaml").write_text("""
 - entry: a:A
   enabled: true
 - entry: b:B
   enabled: false
 """)
-            discovery = PluginDiscovery(base)
-            enabled = discovery.discover_enabled()
-            assert len(enabled) == 1
-            assert enabled[0].entry == "a:A"
+        discovery = PluginDiscovery(base)
+        enabled = discovery.discover_enabled()
+        assert len(enabled) == 1
+        assert enabled[0].entry == "a:A"
 
 
 class TestPluginManager:
     """插件管理器"""
 
     def test_load_all_no_plugins(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir)
-            (base / "data" / "config").mkdir(parents=True)
-            mgr = PluginManager(base)
-            results = mgr.load_all()
-            assert results == []
-            assert mgr.loaded_count == 0
-            assert mgr.failed_count == 0
+        base = _runtime_root("no_plugins")
+        (base / "data" / "config").mkdir(parents=True)
+        mgr = PluginManager(base)
+        results = mgr.load_all()
+        assert results == []
+        assert mgr.loaded_count == 0
+        assert mgr.failed_count == 0
 
     def test_collect_tools_empty(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir)
-            (base / "data" / "config").mkdir(parents=True)
-            mgr = PluginManager(base)
-            mgr.load_all()
-            tools = mgr.collect_tools()
-            assert tools == []
+        base = _runtime_root("empty_tools")
+        (base / "data" / "config").mkdir(parents=True)
+        mgr = PluginManager(base)
+        mgr.load_all()
+        tools = mgr.collect_tools()
+        assert tools == []
 
     def test_collect_tools_tabs_empty(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir)
-            (base / "data" / "config").mkdir(parents=True)
-            mgr = PluginManager(base)
-            mgr.load_all()
-            tabs = mgr.collect_tools_tabs()
-            assert tabs == []
+        base = _runtime_root("empty_tabs")
+        (base / "data" / "config").mkdir(parents=True)
+        mgr = PluginManager(base)
+        mgr.load_all()
+        tabs = mgr.collect_tools_tabs()
+        assert tabs == []
+
+    def test_loads_manifest_plugin_and_registers_all_contributions(self) -> None:
+        base = _runtime_root("load_manifest")
+        _write_demo_plugin(base)
+        registry = ToolRegistry()
+        mgr = PluginManager(base)
+
+        results = mgr.load_all(registry)
+
+        assert results[0].loaded
+        assert registry.get("demo_echo") is not None
+        assert registry.execute("demo_echo", {"text": "hi"}).content == {"text": "hi"}
+        assert [tab.title for tab in mgr.tools_tabs] == ["Demo 工具"]
+        assert [panel.title for panel in mgr.settings_panels] == ["Demo 设置"]
+        assert [widget.widget_id for widget in mgr.chat_ui_widgets] == ["demo_widget"]
+        assert mgr.prompt_patches[0].system_prompt_append == "demo system"
+
+    def test_duplicate_tool_name_marks_plugin_failed(self) -> None:
+        base = _runtime_root("duplicate_tool")
+        _write_demo_plugin(base, tool_name="existing_tool")
+        registry = ToolRegistry([Tool(name="existing_tool", description="builtin")])
+        mgr = PluginManager(base)
+
+        results = mgr.load_all(registry)
+
+        assert not results[0].loaded
+        assert "重复" in str(results[0].error)
+        assert mgr.failed_count == 1
+
+    def test_plugin_failure_isolated_from_later_plugin(self) -> None:
+        base = _runtime_root("failure_isolation")
+        _write_failing_plugin(base, "bad", priority=200)
+        _write_demo_plugin(base, plugin_id="good", tool_name="good_echo", priority=100)
+        registry = ToolRegistry()
+        mgr = PluginManager(base)
+
+        results = mgr.load_all(registry)
+
+        assert len(results) == 2
+        assert results[0].error == "boom"
+        assert results[1].loaded
+        assert registry.get("good_echo") is not None
+
+    def test_required_plugin_failure_stops_loading(self) -> None:
+        base = _runtime_root("required_failure")
+        _write_failing_plugin(base, "bad", priority=200, required=True)
+        _write_demo_plugin(base, plugin_id="good", tool_name="good_echo", priority=100)
+        registry = ToolRegistry()
+        mgr = PluginManager(base)
+
+        results = mgr.load_all(registry)
+
+        assert len(results) == 1
+        assert results[0].error == "boom"
+        assert registry.get("good_echo") is None
+
+    def test_shutdown_all_uses_reverse_load_order(self) -> None:
+        base = _runtime_root("shutdown_order")
+        _write_shutdown_plugin(base, "first", priority=200)
+        _write_shutdown_plugin(base, "second", priority=100)
+        mgr = PluginManager(base)
+        mgr.load_all()
+
+        mgr.shutdown_all()
+
+        order_file = base / "shutdown_order.txt"
+        assert order_file.read_text(encoding="utf-8").splitlines() == ["second", "first"]
 
     def test_plugin_load_result(self) -> None:
         spec = PluginSpec(entry="test:Test")
@@ -202,3 +312,129 @@ class TestContributionTypes:
         pp = PromptPatchContribution(patch_id="p1", system_prompt_append="extra prompt")
         assert pp.patch_id == "p1"
         assert pp.system_prompt_append == "extra prompt"
+
+
+def _runtime_root(name: str) -> Path:
+    root = (
+        Path(__file__).resolve().parents[2]
+        / "__pycache__"
+        / "test_runtime"
+        / "plugin_system"
+        / name
+        / uuid.uuid4().hex
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _write_plugin_manifest(
+    base: Path,
+    plugin_id: str,
+    *,
+    priority: int = 100,
+    required: bool = False,
+) -> Path:
+    plugin_dir = base / "plugins" / plugin_id
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (base / "plugins" / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_dir / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_dir / "plugin.yaml").write_text(
+        f"""
+api_version: 1
+id: {plugin_id}
+name: {plugin_id}
+description: demo 插件介绍
+version: 1.0.0
+entry: plugin:DemoPlugin
+enabled: true
+priority: {priority}
+required: {str(required).lower()}
+""".strip(),
+        encoding="utf-8",
+    )
+    return plugin_dir
+
+
+def _write_demo_plugin(
+    base: Path,
+    *,
+    plugin_id: str = "demo",
+    tool_name: str = "demo_echo",
+    priority: int = 100,
+) -> None:
+    plugin_dir = _write_plugin_manifest(base, plugin_id, priority=priority)
+    plugin_dir.joinpath("plugin.py").write_text(
+        f'''
+from sdk import PluginBase
+from sdk.types import (
+    ChatUIWidgetContribution,
+    PromptPatchContribution,
+    SettingsPanelContribution,
+    ToolContribution,
+    ToolsTabContribution,
+)
+
+
+class DemoPlugin(PluginBase):
+    plugin_id = "{plugin_id}"
+    plugin_version = "1.0.0"
+
+    def initialize(self, register, context):
+        register.register_tool(ToolContribution(
+            name="{tool_name}",
+            description="echo",
+            parameters={{"type": "object", "properties": {{"text": {{"type": "string"}}}}, "required": ["text"]}},
+            handler=lambda args: {{"text": args["text"]}},
+        ))
+        register.register_tools_tab(ToolsTabContribution("demo_tools", "Demo 工具", lambda parent=None: None))
+        register.register_settings_panel(SettingsPanelContribution("demo_settings", "Demo 设置", lambda parent=None: None))
+        register.register_chat_ui_widget(ChatUIWidgetContribution("demo_widget", lambda parent=None: None))
+        register.register_prompt_patch(PromptPatchContribution("demo_patch", system_prompt_append="demo system"))
+'''.strip(),
+        encoding="utf-8",
+    )
+
+
+def _write_failing_plugin(
+    base: Path,
+    plugin_id: str,
+    *,
+    priority: int,
+    required: bool = False,
+) -> None:
+    plugin_dir = _write_plugin_manifest(base, plugin_id, priority=priority, required=required)
+    plugin_dir.joinpath("plugin.py").write_text(
+        f'''
+from sdk import PluginBase
+
+
+class DemoPlugin(PluginBase):
+    plugin_id = "{plugin_id}"
+
+    def initialize(self, register, context):
+        raise RuntimeError("boom")
+'''.strip(),
+        encoding="utf-8",
+    )
+
+
+def _write_shutdown_plugin(base: Path, plugin_id: str, *, priority: int) -> None:
+    plugin_dir = _write_plugin_manifest(base, plugin_id, priority=priority)
+    plugin_dir.joinpath("plugin.py").write_text(
+        f'''
+from sdk import PluginBase
+
+
+class DemoPlugin(PluginBase):
+    plugin_id = "{plugin_id}"
+
+    def initialize(self, register, context):
+        self.context = context
+
+    def shutdown(self):
+        path = self.context.base_dir / "shutdown_order.txt"
+        previous = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(previous + "{plugin_id}\\n", encoding="utf-8")
+'''.strip(),
+        encoding="utf-8",
+    )

@@ -244,6 +244,9 @@ def build_deferred_services(base_dir: Path, context: AppContext) -> DeferredStar
         print(f"[Plugin] 启动加载失败，已跳过插件：{exc}")
         debug_log("PluginManager", "启动加载失败，已跳过插件", {"error": str(exc)})
         errors.append(f"插件加载失败，已跳过：{exc}")
+    for result in plugin_manager.results:
+        if result.error:
+            errors.append(f"插件 {result.spec.plugin_id or result.spec.entry} 加载失败：{result.error}")
     mcp_settings = settings_service.load_mcp_runtime_settings()
     mcp_tool_provider = register_mcp_tools_from_config(
         base_dir,
@@ -279,6 +282,7 @@ def build_app_context(base_dir: Path, startup_state: StartupState | None = None)
     context = build_initial_app_context(base_dir, startup_state=startup_state)
     deferred = build_deferred_services(base_dir, context)
     context.agent_runtime.tools = deferred.tool_registry
+    context.agent_runtime.set_prompt_patches(deferred.plugin_manager.prompt_patches)
     return AppContext(
         base_dir=context.base_dir,
         settings_service=context.settings_service,

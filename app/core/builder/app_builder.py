@@ -192,6 +192,7 @@ class AppBuilder:
             reply_portraits=list(self._character_profile.portrait_map.keys()),
             tools=self._tool_registry,
             memory=self._memory_store,
+            prompt_patches=self._plugin_manager.prompt_patches if self._plugin_manager else [],
         )
         core = CoreServices(
             api_client=self._api_client,

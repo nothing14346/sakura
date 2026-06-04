@@ -50,6 +50,8 @@ from app.llm.api_client import (
     STRUCTURED_JSON_RESPONSE_FORMAT,
 )
 from app.llm.prompts.recipes import build_theme_color_system_prompt
+from app.plugins.discovery import PluginDiscovery, save_plugin_enabled_overrides
+from app.plugins.models import PluginSpec
 from app.config.character_loader import CharacterProfile, CharacterRegistry
 from app.ui.portrait_controller import (
     PORTRAIT_SCALE_DEFAULT_PERCENT,
@@ -98,7 +100,7 @@ from app.ui.theme import (
     parse_ai_theme_response,
 )
 from app.voice.tts_bundle import default_provider_bundle_work_dir, is_provider_bundle_work_dir
-from sdk.types import ToolsTabContribution
+from sdk.types import SettingsPanelContribution, ToolsTabContribution
 
 
 MEMORY_READING_TEXT = "正在读取长期记忆..."
@@ -265,6 +267,7 @@ class SettingsDialog(QDialog):
         debug_log_settings: DebugLogSettings | None = None,
         memory_store: MemoryStore | None = None,
         tools_tab_contributions: list[ToolsTabContribution] | None = None,
+        settings_panel_contributions: list[SettingsPanelContribution] | None = None,
         parent=None,  # type: ignore[no-untyped-def]
         portrait_scale_percent: int = PORTRAIT_SCALE_DEFAULT_PERCENT,
         subtitle_typing_interval_ms: int = SPEECH_TYPING_INTERVAL_MS,
@@ -275,6 +278,12 @@ class SettingsDialog(QDialog):
         self.base_dir = base_dir
         self.tts_settings = tts_settings
         self.theme_settings = (theme_settings or DEFAULT_THEME_SETTINGS).normalized()
+        self.plugin_specs: list[PluginSpec] = PluginDiscovery(self.base_dir).discover()
+        self._plugin_specs_by_id = {
+            spec.plugin_id: spec
+            for spec in self.plugin_specs
+            if spec.plugin_id
+        }
         self.character_registry = character_registry
         self.current_character = current_character
         self.portrait_scale_percent = normalize_portrait_scale_percent(portrait_scale_percent)
@@ -302,6 +311,7 @@ class SettingsDialog(QDialog):
         self.result_mcp_settings: MCPRuntimeSettings | None = None
         self.result_debug_log_settings: DebugLogSettings | None = None
         self.result_theme_settings: ThemeSettings | None = None
+        self.result_plugin_config_changed = False
         self._api_test_thread: QThread | None = None
         self._api_test_worker: ApiConnectionTestWorker | None = None
         self._tts_test_thread: QThread | None = None
@@ -337,6 +347,10 @@ class SettingsDialog(QDialog):
                 tools_tab_contributions or [],
             ),
             "工具",
+        )
+        tabs.addTab(
+            self._build_plugin_tab(settings_panel_contributions or []),
+            "插件",
         )
         tabs.addTab(self._build_system_tab(debug_log_settings or DebugLogSettings()), "系统")
         if memory_store is not None:
@@ -675,6 +689,137 @@ class SettingsDialog(QDialog):
             form_layout.addRow(contribution.title, widget)
         tab.setLayout(form_layout)
         return tab
+
+    def _build_plugin_tab(
+        self,
+        settings_panel_contributions: list[SettingsPanelContribution],
+    ) -> QWidget:
+        tab = QWidget(self)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(16, 18, 16, 16)
+        layout.setSpacing(12)
+
+        hint = QLabel("插件启用状态保存后需要重启 Sakura 才会生效。", tab)
+        hint.setObjectName("pluginRestartHintLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.plugin_table = QTableWidget(tab)
+        self.plugin_table.setObjectName("pluginManagerTable")
+        self.plugin_table.setColumnCount(6)
+        self.plugin_table.setHorizontalHeaderLabels(["启用", "名称", "版本", "优先级", "来源", "介绍"])
+        self.plugin_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.plugin_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.plugin_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.plugin_table.setAlternatingRowColors(True)
+        self.plugin_table.setWordWrap(True)
+        self.plugin_table.verticalHeader().setVisible(False)
+        self.plugin_table.setRowCount(len(self.plugin_specs))
+        header = self.plugin_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        for row, spec in enumerate(self.plugin_specs):
+            self._populate_plugin_table_row(row, spec)
+        self.plugin_table.resizeRowsToContents()
+        layout.addWidget(self.plugin_table, 1)
+
+        panel_title = QLabel("插件自定义设置", tab)
+        panel_title.setObjectName("pluginSettingsTitleLabel")
+        layout.addWidget(panel_title)
+
+        panel_container = QWidget(tab)
+        form_layout = QFormLayout()
+        form_layout.setContentsMargins(0, 0, 0, 0)
+        form_layout.setSpacing(10)
+        for contribution in sorted(settings_panel_contributions, key=lambda item: item.order):
+            try:
+                widget = contribution.build(tab)
+            except Exception as exc:
+                widget = QLabel(f"{contribution.title} 设置加载失败：{exc}", tab)
+                widget.setWordWrap(True)
+            form_layout.addRow(contribution.title, widget)
+        if not settings_panel_contributions:
+            empty_label = QLabel("暂无插件自定义设置。", tab)
+            empty_label.setWordWrap(True)
+            form_layout.addRow("", empty_label)
+        panel_container.setLayout(form_layout)
+        layout.addWidget(panel_container)
+        tab.setLayout(layout)
+        return tab
+
+    def _populate_plugin_table_row(self, row: int, spec: PluginSpec) -> None:
+        enabled_item = QTableWidgetItem("")
+        enabled_item.setData(Qt.ItemDataRole.UserRole, spec.plugin_id)
+        enabled_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.plugin_table.setItem(row, 0, enabled_item)
+        self._set_plugin_checkbox_widget(row, spec)
+
+        values = [
+            spec.name or spec.plugin_id or spec.entry,
+            spec.version,
+            str(spec.priority),
+            "内置清单" if spec.source == "manifest" else "配置",
+            spec.description or "暂无介绍。",
+        ]
+        for column, value in enumerate(values, start=1):
+            item = QTableWidgetItem(value)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            if column == 5:
+                item.setToolTip(value)
+            self.plugin_table.setItem(row, column, item)
+        self._apply_plugin_row_style(row)
+
+    def _set_plugin_checkbox_widget(self, row: int, spec: PluginSpec) -> None:
+        container = QWidget(self.plugin_table)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        checkbox = QCheckBox(container)
+        checkbox.setChecked(spec.enabled or spec.required)
+        checkbox.setEnabled(not spec.required)
+        checkbox.setToolTip("启用此插件" if not spec.required else "必需插件不可禁用。")
+        checkbox.stateChanged.connect(lambda _state, current_row=row: self._apply_plugin_row_style(current_row))
+        layout.addWidget(checkbox, 0, Qt.AlignmentFlag.AlignCenter)
+        container.setLayout(layout)
+        self.plugin_table.setCellWidget(row, 0, container)
+        self._style_plugin_checkbox_container(container, row)
+
+    def _apply_plugin_row_style(self, row: int) -> None:
+        brush = _memory_row_background(row, False, self.theme_settings)
+        for column in range(self.plugin_table.columnCount()):
+            item = self.plugin_table.item(row, column)
+            if item is not None:
+                item.setBackground(brush)
+        container = self.plugin_table.cellWidget(row, 0)
+        if container is not None:
+            self._style_plugin_checkbox_container(container, row)
+
+    def _style_plugin_checkbox_container(self, container: QWidget, row: int) -> None:
+        color = _memory_row_background_color(row, False, self.theme_settings)
+        container.setStyleSheet(f"background: {color};")
+
+    def _selected_plugin_enabled_overrides(self) -> dict[str, bool]:
+        if not hasattr(self, "plugin_table"):
+            return {}
+        selected: dict[str, bool] = {}
+        for row in range(self.plugin_table.rowCount()):
+            item = self.plugin_table.item(row, 0)
+            if item is None:
+                continue
+            plugin_id = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(plugin_id, str) or not plugin_id:
+                continue
+            spec = self._plugin_specs_by_id.get(plugin_id)
+            container = self.plugin_table.cellWidget(row, 0)
+            checkbox = container.findChild(QCheckBox) if container is not None else None
+            selected[plugin_id] = bool(
+                spec.required if spec is not None and spec.required else checkbox is not None and checkbox.isChecked()
+            )
+        return selected
 
     def _build_system_tab(self, debug_settings: DebugLogSettings) -> QWidget:
         tab = QWidget(self)
@@ -1541,6 +1686,12 @@ class SettingsDialog(QDialog):
         if not isinstance(debug_log_settings, DebugLogSettings):
             return
 
+        try:
+            plugin_config_changed = self._save_plugin_settings_if_needed()
+        except OSError as exc:
+            QMessageBox.critical(self, "保存失败", f"无法保存插件配置：{exc}")
+            return
+
         self.result_api_settings = api_settings
         self.result_tts_settings = tts_settings
         self.result_character_id = character_id
@@ -1551,7 +1702,14 @@ class SettingsDialog(QDialog):
         self.result_proactive_care_settings = proactive_care_settings
         self.result_mcp_settings = mcp_settings
         self.result_debug_log_settings = debug_log_settings
+        self.result_plugin_config_changed = plugin_config_changed
         super().accept()
+
+    def _save_plugin_settings_if_needed(self) -> bool:
+        enabled_by_id = self._selected_plugin_enabled_overrides()
+        if not enabled_by_id:
+            return False
+        return save_plugin_enabled_overrides(self.base_dir, enabled_by_id)
 
     def reject(self) -> None:
         if self._api_test_thread is not None:

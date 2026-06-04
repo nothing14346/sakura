@@ -98,7 +98,7 @@ def test_plugin_manager_loads_playwright_browser_plugin() -> None:
         "playwright_evaluate",
     }.issubset(names)
     assert registry.get("playwright_evaluate").requires_confirmation  # type: ignore[union-attr]
-    assert [tab.title for tab in manager.tools_tabs] == ["Playwright 浏览器"]
+    assert "Playwright 浏览器" in [tab.title for tab in manager.tools_tabs]
 
     manager.shutdown_all()
 
@@ -106,8 +106,12 @@ def test_plugin_manager_loads_playwright_browser_plugin() -> None:
 def test_plugin_config_manifest_is_read() -> None:
     specs = load_plugin_specs(Path(__file__).resolve().parents[2] / "data" / "config" / "plugins.yaml")
 
-    assert specs[0].entry == "plugins.playwright_browser.plugin:PlaywrightBrowserPlugin"
+    assert specs[0].plugin_id == "playwright_browser"
+    assert specs[0].entry == "plugin:PlaywrightBrowserPlugin"
     assert specs[0].enabled
+    example_plugin = next(spec for spec in specs if spec.plugin_id == "example_plugin")
+    assert example_plugin.entry == "plugin:ExamplePlugin"
+    assert not example_plugin.enabled
 
 
 def test_tool_registry_exports_openai_function_schema() -> None:

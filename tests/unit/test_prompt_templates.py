@@ -11,6 +11,7 @@ from app.llm.prompt_templates import (
     build_proactive_tool_loop_rules,
     build_segmented_reply_instruction,
 )
+from sdk.types import PromptPatchContribution
 
 
 def _build_proactive_tool_prompt() -> str:
@@ -137,6 +138,30 @@ def test_agent_tool_prompt_length_stays_compact() -> None:
 
     assert len(prompt) < 2800
     assert prompt.count("主动感知核心规则") == 0
+
+
+def test_agent_runtime_prompt_patches_apply_to_prompt_builders() -> None:
+    runtime = AgentRuntime.__new__(AgentRuntime)
+    runtime.system_prompt = "角色设定"
+    runtime.reply_tones = ["中性"]
+    runtime.reply_portraits = ["站立待机"]
+    runtime.memory = SimpleNamespace(summary=lambda: "无")
+    runtime.prompt_patches = [
+        PromptPatchContribution(
+            patch_id="demo",
+            system_prompt_append="插件系统补丁",
+            reply_protocol_append="回复时保留插件约定",
+        )
+    ]
+
+    tool_prompt = AgentRuntime._build_tool_system_prompt(runtime)
+    proactive_prompt = AgentRuntime._build_proactive_tool_system_prompt(runtime)
+    event_prompt = AgentRuntime._build_event_reply_prompt(runtime, "reminder_due")
+    final_prompt = AgentRuntime._build_final_reply_prompt(runtime)
+
+    for prompt in [tool_prompt, proactive_prompt, event_prompt, final_prompt]:
+        assert "插件系统补丁" in prompt
+        assert "回复时保留插件约定" in prompt
 
 
 def test_proactive_event_does_not_pass_duplicate_loop_rules(monkeypatch) -> None:

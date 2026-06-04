@@ -50,6 +50,7 @@ from app.llm.prompt_templates import (
     build_event_system_prompt,
     build_proactive_check_tool_system_prompt,
 )
+from sdk.types import PromptPatchContribution
 
 
 
@@ -64,6 +65,7 @@ class AgentRuntime:
         reply_portraits: list[str] | None = None,
         tools: ToolRegistry | None = None,
         memory: MemoryStore | None = None,
+        prompt_patches: list[PromptPatchContribution] | None = None,
     ) -> None:
         self.api_client = api_client
         self.system_prompt = system_prompt
@@ -71,6 +73,7 @@ class AgentRuntime:
         self.reply_portraits = [*reply_portraits] if reply_portraits is not None else []
         self.tools = tools or ToolRegistry()
         self.memory = memory or MemoryStore()
+        self.prompt_patches = [*prompt_patches] if prompt_patches is not None else []
         self.model_vision_enabled = True
         self.autonomous_screen_observation_enabled = True
 
@@ -84,6 +87,10 @@ class AgentRuntime:
         self.system_prompt = system_prompt
         self.reply_tones = [*reply_tones] if reply_tones is not None else []
         self.reply_portraits = [*reply_portraits] if reply_portraits is not None else []
+
+    def set_prompt_patches(self, prompt_patches: list[PromptPatchContribution] | None) -> None:
+        """同步插件提示词补丁。"""
+        self.prompt_patches = [*prompt_patches] if prompt_patches is not None else []
 
     def set_model_vision_enabled(self, enabled: bool) -> None:
         """允许模型在需要时请求一次当前屏幕截图。"""
@@ -750,6 +757,35 @@ class AgentRuntime:
             actions=[event_action],
         )
 
+    def _patched_system_prompt(self) -> str:
+        parts = [self.system_prompt.strip()]
+        parts.extend(
+            patch.system_prompt_append.strip()
+            for patch in getattr(self, "prompt_patches", [])
+            if patch.system_prompt_append.strip()
+        )
+        return "\n\n".join(part for part in parts if part)
+
+    def _reply_protocol_patch_text(self) -> str:
+        patches = [
+            patch.reply_protocol_append.strip()
+            for patch in getattr(self, "prompt_patches", [])
+            if patch.reply_protocol_append.strip()
+        ]
+        if not patches:
+            return ""
+        return "插件回复协议补充：\n" + "\n".join(f"- {patch}" for patch in patches)
+
+    def _apply_reply_protocol_patches(self, reply_protocol: str) -> str:
+        reply_patch = self._reply_protocol_patch_text()
+        if not reply_patch:
+            return reply_protocol
+        return f"{reply_protocol.strip()}\n\n{reply_patch}"
+
+    def _combine_extra_instructions(self, extra_instructions: str = "") -> str:
+        parts = [extra_instructions.strip(), self._reply_protocol_patch_text()]
+        return "\n".join(part for part in parts if part)
+
     def _build_tool_system_prompt(
         self,
         allow_screen_observation: bool = False,
@@ -761,7 +797,9 @@ class AgentRuntime:
     ) -> str:
         memory_summary = self._memory_summary()
         current_time = datetime.now().astimezone().isoformat(timespec="seconds")
-        reply_protocol = build_agent_reply_protocol(self.reply_tones, self.reply_portraits)
+        reply_protocol = self._apply_reply_protocol_patches(
+            build_agent_reply_protocol(self.reply_tones, self.reply_portraits)
+        )
         context_strategy = build_context_acquisition_strategy(
             allow_screen_observation=allow_screen_observation
         )
@@ -770,7 +808,7 @@ class AgentRuntime:
         visible_browser_rule = _build_visible_browser_mode_rule(visible_browser_mode)
         web_tool_capability_rule = _build_web_tool_capability_rule(visible_browser_mode)
         return f"""
-{self.system_prompt.strip()}
+{self._patched_system_prompt()}
 
 你现在是 Sakura 的桌面陪伴型 Agent。上下文不足、需要核实或工具能明显提升帮助质量时，可以主动发起 tool_calls；信息足够时直接按回复协议回答。
 不要把工具计划、工具名伪代码或 tool_calls JSON 写进正文。
@@ -808,7 +846,7 @@ class AgentRuntime:
 {visible_browser_rule}
 - 如果 playwright_ 浏览器工具不可用，说明网页自动化能力不可用；不要回退到 Sakura 内置浏览器工具。
 - 需要网页交互时，只能基于当前页面真实内容选择工具，不要臆造 selector、target 或页面内容。
-{extra_instructions.strip()}
+{self._combine_extra_instructions(extra_instructions)}
 - 用户说“几分钟后/几秒后/一会儿后”等相对提醒时，add_reminder 必须使用 delay_minutes 或 delay_seconds，不要自己换算 trigger_at。
 - 只有用户给出明确日期或钟点时，add_reminder 才使用 trigger_at。
 - 需要跨会话信息、用户偏好或项目状态时，优先使用 memory_search。
@@ -825,7 +863,7 @@ class AgentRuntime:
         memory_summary = self._memory_summary()
         current_time = datetime.now().astimezone().isoformat(timespec='seconds')
         return build_proactive_check_tool_system_prompt(
-            self.system_prompt,
+            self._patched_system_prompt(),
             self.reply_tones,
             self.reply_portraits,
             memory_summary=memory_summary,
@@ -834,24 +872,29 @@ class AgentRuntime:
             remaining_steps=remaining_steps,
             max_tool_calls_per_step=MAX_TOOL_CALLS_PER_STEP,
             max_tool_calls_per_turn=MAX_TOOL_CALLS_PER_TURN,
-            extra_instructions=extra_instructions,
+            extra_instructions=self._combine_extra_instructions(extra_instructions),
         )
     def _build_final_reply_prompt(self) -> str:
         return f"""
-{self.system_prompt.strip()}
+{self._patched_system_prompt()}
 
 你会收到上一轮工具调用结果。请基于这些结果给用户最终回复。
 不要再次请求工具，不要提及内部 JSON、工具协议或实现细节。
 如果工具结果信息丰富，可以适当展开总结、补充细节或引导对话继续，让用户能感受到信息已经被充分理解和整理。
+{self._reply_protocol_patch_text()}
 """.strip()
 
     def _build_event_reply_prompt(self, event_type: str = "reminder_due") -> str:
-        return build_event_system_prompt(
-            self.system_prompt,
+        prompt = build_event_system_prompt(
+            self._patched_system_prompt(),
             self.reply_tones,
             self.reply_portraits,
             event_type=event_type,
         )
+        reply_patch = self._reply_protocol_patch_text()
+        if reply_patch:
+            return f"{prompt}\n\n{reply_patch}"
+        return prompt
 
     def _memory_summary(self) -> str:
         try:

@@ -5,8 +5,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from sdk.types import (
+    ChatUIWidgetContribution,
+    PromptPatchContribution,
+    SettingsPanelContribution,
+    ToolContribution,
+    ToolsTabContribution,
+)
 
 
 @dataclass(frozen=True)
@@ -17,11 +25,15 @@ class PluginManifest:
     """
 
     plugin_id: str
+    name: str = ""
+    description: str = ""
     version: str = "0.0.0"
+    api_version: int = 1
     priority: int = 100
     enabled: bool = True
     required: bool = False
     entry: str = ""
+    plugin_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -34,57 +46,12 @@ class PluginSpec:
     entry: str
     enabled: bool = True
     priority: int = 100
-
-
-# ---- 贡献点类型 ----
-
-@dataclass(frozen=True)
-class ToolContribution:
-    """插件提供的工具贡献。"""
-
-    name: str
-    description: str
-    parameters: dict[str, Any] = field(default_factory=dict)
-    handler: Callable[..., Any] | None = None
-    group: str = "default"
-    risk: str = "low"
-    requires_confirmation: bool = False
-    capability: str | None = None
-
-
-@dataclass(frozen=True)
-class SettingsPanelContribution:
-    """插件贡献到设置窗口的面板/区段。"""
-
-    section_id: str
-    title: str
-    build: Callable[[Any], Any]
-    order: float = 100.0
-
-
-@dataclass(frozen=True)
-class ToolsTabContribution:
-    """插件贡献到设置窗口的工具页。"""
-
-    tab_id: str
-    title: str
-    build: Callable[[Any], Any]
-    order: float = 100.0
-
-
-@dataclass(frozen=True)
-class ChatUIWidgetContribution:
-    """插件贡献到聊天 UI 的组件。"""
-
-    widget_id: str
-    build: Callable[[Any], Any]
-    order: float = 100.0
-
-
-@dataclass(frozen=True)
-class PromptPatchContribution:
-    """插件贡献的提示词/输出合约补丁。"""
-
-    patch_id: str
-    system_prompt_append: str = ""
-    reply_protocol_append: str = ""
+    plugin_id: str = ""
+    name: str = ""
+    description: str = ""
+    version: str = "0.0.0"
+    api_version: int = 1
+    required: bool = False
+    plugin_root: Path | None = None
+    source: str = "config"
+    priority_override: bool = False

@@ -15,7 +15,7 @@
 """
 
 from app.plugins.capabilities import PluginCapabilities, PluginCapabilityRegistry
-from app.plugins.discovery import PluginDiscovery
+from app.plugins.discovery import PluginDiscovery, load_plugin_specs
 from app.plugins.manager import PluginLoadResult, PluginManager
 from app.plugins.models import (
     ChatUIWidgetContribution,
@@ -40,4 +40,5 @@ __all__ = [
     "SettingsPanelContribution",
     "ToolContribution",
     "ToolsTabContribution",
+    "load_plugin_specs",
 ]
