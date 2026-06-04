@@ -550,7 +550,7 @@ class SettingsDialog(QDialog):
         self.tts_api_url_edit = QLineEdit(settings.api_url, tab)
         self.tts_api_url_edit.setPlaceholderText(_default_tts_api_url(settings.provider))
         self.tts_work_dir_edit = QLineEdit(str(settings.work_dir or ""), tab)
-        self.tts_work_dir_edit.setPlaceholderText("data/tts_bundles/installed/gpt_sovits_nvidia50/GPT-SoVITS-v2pro-20250604-nvidia50")
+        self.tts_work_dir_edit.setPlaceholderText("tts/g50")
         self.tts_bundle_download_button = QPushButton("一键下载 TTS 整合包", tab)
         self.tts_bundle_download_button.clicked.connect(self._download_gpt_sovits_bundle)
         self.tts_provider_combo.currentIndexChanged.connect(lambda _index: self._sync_tts_provider_controls(apply_defaults=True))
@@ -1714,11 +1714,11 @@ class SettingsDialog(QDialog):
         provider = str(self.tts_provider_combo.currentData() or TTS_PROVIDER_GPT_SOVITS)
         self.tts_api_url_edit.setPlaceholderText(_default_tts_api_url(provider))
         if provider == TTS_PROVIDER_GENIE:
-            self.tts_work_dir_edit.setPlaceholderText("data/tts_bundles/installed/genie_tts_server/Genie-TTS Server")
+            self.tts_work_dir_edit.setPlaceholderText("tts/cpu")
         elif provider == TTS_PROVIDER_CUSTOM_GPT_SOVITS:
             self.tts_work_dir_edit.setPlaceholderText("外部 GPT-SoVITS 工作目录，可留空")
         else:
-            self.tts_work_dir_edit.setPlaceholderText("data/tts_bundles/installed/gpt_sovits_nvidia50/GPT-SoVITS-v2pro-20250604-nvidia50")
+            self.tts_work_dir_edit.setPlaceholderText("tts/g50")
         bundled = _is_bundled_tts_provider(provider)
         self.tts_api_url_edit.setReadOnly(bundled)
         self.tts_work_dir_edit.setReadOnly(bundled)
