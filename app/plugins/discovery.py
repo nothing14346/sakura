@@ -180,6 +180,8 @@ def save_plugin_enabled_overrides(
             enabled = True
         item = by_id.get(spec.plugin_id, {})
         item["id"] = spec.plugin_id
+        if spec.source != "manifest" and spec.entry:
+            item["entry"] = spec.entry
         item["enabled"] = bool(enabled)
         item["priority"] = int(item.get("priority", spec.priority))
         next_entries.append(item)
