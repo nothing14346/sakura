@@ -14,7 +14,7 @@ jobs:
     outputs:
       TAG: ${{ steps.gen.outputs.TAG }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Generate package tag
         id: gen
@@ -41,7 +41,7 @@ jobs:
       BUNDLE_ARCHIVE: sakura-${{ needs.metadata.outputs.TAG }}-${{ matrix.platform }}.zip
       RUNTIME_ARCHIVE: runtime-${{ matrix.platform }}.zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download Python 3.12 embeddable runtime
         shell: bash
@@ -77,11 +77,11 @@ jobs:
         run: Compress-Archive -Path runtime -DestinationPath "$env:RUNTIME_ARCHIVE" -Force
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sakura-${{ needs.metadata.outputs.TAG }}-${{ matrix.platform }}
           path: |
             ${{ env.BUNDLE_ARCHIVE }}
             ${{ env.RUNTIME_ARCHIVE }}
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 5
