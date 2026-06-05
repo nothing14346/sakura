@@ -343,6 +343,7 @@ class PetWindow(QWidget):
         self.memory_curation_mode = ""
         self.memory_curation_target_history_count = 0
         self.memory_curation_consumed_turns = 0
+        self.pending_history_clear_after_curation = False
         self.drag_offset: QPoint | None = None
         self.portrait_scale_percent = self._load_portrait_scale_percent()
         (
@@ -1997,6 +1998,8 @@ class PetWindow(QWidget):
             return
         if not self.memory_curation_settings.enabled:
             return
+        if self.pending_history_clear_after_curation:
+            return
         state = self.memory_curation_state.snapshot()
         if state.get("backfill_completed"):
             return
@@ -2121,9 +2124,32 @@ class PetWindow(QWidget):
         self.memory_curation_mode = ""
         self.memory_curation_target_history_count = 0
         self.memory_curation_consumed_turns = 0
+        if self.pending_history_clear_after_curation:
+            self.pending_history_clear_after_curation = False
+            if self._start_pending_history_clear_after_curation():
+                return
         if self.history_window is not None:
             self.history_window.set_memory_save_busy(False)
         QTimer.singleShot(0, self._maybe_start_auto_memory_curation)
+
+    def _start_pending_history_clear_after_curation(self) -> bool:
+        if not self._memory_curation_can_start():
+            return False
+        entries = self.history_store.load()
+        if not entries:
+            if self.history_window is not None:
+                self.history_window.refresh()
+            return False
+        if not self._memory_store_ready_for_history_clear():
+            self._show_memory_not_ready_for_history_clear()
+            return False
+        self._start_memory_curation(
+            entries,
+            mode="history_clear",
+            target_history_count=len(entries),
+            consumed_turns=self.memory_curation_state.pending_turns(),
+        )
+        return self.memory_curation_thread is not None
 
     @Slot(object)
     def apply_deferred_services(self, services: "DeferredStartupServices") -> None:
@@ -2453,6 +2479,14 @@ class PetWindow(QWidget):
 
     def _save_history_to_memory_and_clear(self) -> None:
         if self.memory_curation_thread is not None:
+            if self.memory_curation_mode in {"auto", "backfill"}:
+                self.pending_history_clear_after_curation = True
+                show_themed_information(
+                    self,
+                    "整理中",
+                    "当前正在自动整理记忆，结束后会继续清空并保存历史。",
+                )
+                return
             show_themed_information(self, "整理中", "记忆整理已经在进行中，请稍后再试。")
             if self.history_window is not None:
                 self.history_window.set_memory_save_busy(False)
@@ -2468,12 +2502,34 @@ class PetWindow(QWidget):
                 self.history_window.set_memory_save_busy(False)
                 self.history_window.refresh()
             return
+        if not self._memory_store_ready_for_history_clear():
+            self._show_memory_not_ready_for_history_clear()
+            if self.history_window is not None:
+                self.history_window.set_memory_save_busy(False)
+            return
         self._start_memory_curation(
             entries,
             mode="history_clear",
             target_history_count=len(entries),
             consumed_turns=self.memory_curation_state.pending_turns(),
         )
+
+    def _memory_store_ready_for_history_clear(self) -> bool:
+        is_ready = getattr(self.memory_store, "is_ready", None)
+        if not callable(is_ready):
+            return True
+        try:
+            return bool(is_ready())
+        except Exception as exc:  # noqa: BLE001
+            debug_log("Memory", "检查长期记忆就绪状态失败", {"error": str(exc)})
+            return False
+
+    def _show_memory_not_ready_for_history_clear(self) -> None:
+        message = getattr(self, "memory_status_last_message", "") or (
+            "长期记忆系统还在初始化。首次启动或覆盖更新后，"
+            "可能需要准备本地嵌入模型，请稍等就绪后再试。"
+        )
+        show_themed_information(self, "记忆初始化中", message)
 
     @Slot()
     def show_settings(self) -> None:

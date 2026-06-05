@@ -3255,6 +3255,178 @@ def test_history_clear_keeps_history_when_memory_curation_returns_nothing(monkey
     assert warnings == [("整理失败", "记忆整理没有写入任何结果，已保留聊天历史。请检查日志后再重试。")]
 
 
+def test_history_clear_queues_while_auto_memory_curation_is_running(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    messages: list[tuple[str, str]] = []
+
+    class HistoryWindowStub:
+        def __init__(self) -> None:
+            self.busy_calls: list[bool] = []
+
+        def set_memory_save_busy(self, busy: bool) -> None:
+            self.busy_calls.append(busy)
+
+    class WindowStub:
+        _save_history_to_memory_and_clear = PetWindow._save_history_to_memory_and_clear
+
+        def __init__(self) -> None:
+            self.memory_curation_thread = object()
+            self.memory_curation_mode = "backfill"
+            self.pending_history_clear_after_curation = False
+            self.history_window = HistoryWindowStub()
+            self.worker_thread = None
+
+    monkeypatch.setattr(
+        pet_window_module,
+        "show_themed_information",
+        lambda _parent, title, text, **_kwargs: messages.append((title, text)),
+    )
+
+    window = WindowStub()
+    window._save_history_to_memory_and_clear()
+
+    assert window.pending_history_clear_after_curation is True
+    assert window.history_window.busy_calls == []
+    assert messages == [("整理中", "当前正在自动整理记忆，结束后会继续清空并保存历史。")]
+
+
+def test_queued_history_clear_starts_after_auto_curation_cleanup(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    timer_calls: list[tuple[object, object]] = []
+    monkeypatch.setattr(
+        pet_window_module.QTimer,
+        "singleShot",
+        lambda delay, callback: timer_calls.append((delay, callback)),
+    )
+
+    class DisposableStub:
+        def deleteLater(self) -> None:
+            pass
+
+    class HistoryStoreStub:
+        def load(self) -> list[object]:
+            return [object()]
+
+    class MemoryStoreStub:
+        def is_ready(self) -> bool:
+            return True
+
+    class MemoryCurationStateStub:
+        def pending_turns(self) -> int:
+            return 2
+
+    class HistoryWindowStub:
+        def __init__(self) -> None:
+            self.busy_calls: list[bool] = []
+
+        def set_memory_save_busy(self, busy: bool) -> None:
+            self.busy_calls.append(busy)
+
+    class WindowStub:
+        _cleanup_memory_curation_worker = PetWindow._cleanup_memory_curation_worker
+        _start_pending_history_clear_after_curation = PetWindow._start_pending_history_clear_after_curation
+        _memory_store_ready_for_history_clear = PetWindow._memory_store_ready_for_history_clear
+
+        def __init__(self) -> None:
+            self.memory_curation_worker = DisposableStub()
+            self.memory_curation_thread = DisposableStub()
+            self.memory_curation_mode = "backfill"
+            self.memory_curation_target_history_count = 5
+            self.memory_curation_consumed_turns = 0
+            self.pending_history_clear_after_curation = True
+            self.history_window = HistoryWindowStub()
+            self.history_store = HistoryStoreStub()
+            self.memory_store = MemoryStoreStub()
+            self.memory_curation_state = MemoryCurationStateStub()
+            self.start_calls: list[dict[str, object]] = []
+
+        def _memory_curation_can_start(self) -> bool:
+            return True
+
+        def _start_memory_curation(self, entries, *, mode, target_history_count, consumed_turns):  # type: ignore[no-untyped-def]
+            self.start_calls.append(
+                {
+                    "entry_count": len(entries),
+                    "mode": mode,
+                    "target_history_count": target_history_count,
+                    "consumed_turns": consumed_turns,
+                }
+            )
+            self.memory_curation_thread = object()
+
+    window = WindowStub()
+    window._cleanup_memory_curation_worker()
+
+    assert window.pending_history_clear_after_curation is False
+    assert window.start_calls == [
+        {
+            "entry_count": 1,
+            "mode": "history_clear",
+            "target_history_count": 1,
+            "consumed_turns": 2,
+        }
+    ]
+    assert window.history_window.busy_calls == []
+    assert timer_calls == []
+
+
+def test_history_clear_reports_when_memory_store_is_not_ready(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    messages: list[tuple[str, str]] = []
+
+    class HistoryStoreStub:
+        def load(self) -> list[object]:
+            return [object()]
+
+    class MemoryStoreStub:
+        def is_ready(self) -> bool:
+            return False
+
+    class HistoryWindowStub:
+        def __init__(self) -> None:
+            self.busy_calls: list[bool] = []
+
+        def set_memory_save_busy(self, busy: bool) -> None:
+            self.busy_calls.append(busy)
+
+    class WindowStub:
+        _save_history_to_memory_and_clear = PetWindow._save_history_to_memory_and_clear
+        _memory_store_ready_for_history_clear = PetWindow._memory_store_ready_for_history_clear
+        _show_memory_not_ready_for_history_clear = PetWindow._show_memory_not_ready_for_history_clear
+
+        def __init__(self) -> None:
+            self.memory_curation_thread = None
+            self.memory_curation_mode = ""
+            self.worker_thread = None
+            self.history_store = HistoryStoreStub()
+            self.memory_store = MemoryStoreStub()
+            self.history_window = HistoryWindowStub()
+            self.memory_status_last_message = "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。"
+            self.start_calls = 0
+
+        def _start_memory_curation(self, *_args, **_kwargs) -> None:
+            self.start_calls += 1
+
+    monkeypatch.setattr(
+        pet_window_module,
+        "show_themed_information",
+        lambda _parent, title, text, **_kwargs: messages.append((title, text)),
+    )
+
+    window = WindowStub()
+    window._save_history_to_memory_and_clear()
+
+    assert window.start_calls == 0
+    assert window.history_window.busy_calls == [False]
+    assert messages == [("记忆初始化中", "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。")]
+
+
 def test_show_settings_reloads_memory_in_background_when_api_changes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     import app.ui.pet_window as pet_window_module
     from app.ui.pet_window import PetWindow
