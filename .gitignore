@@ -8,6 +8,8 @@ __pycache__/
 *$py.class
 *.egg-info/
 
+.vscode/
+
 .venv/
 venv/
 runtime/
