@@ -12,6 +12,8 @@ from app.storage.chat_history import ChatHistoryEntry
 
 DEFAULT_AUTO_MEMORY_TRIGGER_TURNS = 8
 DEFAULT_AUTO_MEMORY_BACKFILL_LIMIT = 200
+MAX_CURATION_CHUNK_MESSAGES = 32
+MAX_CURATION_CHUNK_CHARS = 12000
 
 
 @dataclass(frozen=True)
@@ -119,37 +121,51 @@ class MemoryCurator:
         if not model_entries:
             return MemoryCurationResult(processed_entries=len(entries))
 
-        counts = self.memory_store.add_history_entries(entries)
-        result = MemoryCurationResult(
-            created=counts.created,
-            updated=counts.updated,
-            archived=counts.deleted,
-            ignored=counts.ignored,
+        created = 0
+        updated = 0
+        archived = 0
+        ignored = 0
+        returned = 0
+        unclassified = 0
+        event_counts: dict[str, int] = {}
+        for chunk in _chunk_entries_for_curation(entries):
+            counts = self.memory_store.add_history_entries(chunk)
+            chunk_created = counts.created
+            chunk_updated = counts.updated
+            chunk_archived = counts.deleted
+            chunk_ignored = counts.ignored
+            chunk_returned = counts.returned
+            chunk_unclassified = counts.unclassified
+            _merge_event_counts(event_counts, counts.event_counts)
+            if chunk_returned == 0 and self.api_client is not None:
+                fallback_created = self._curate_entries_with_fallback(_entries_for_model(chunk))
+                if fallback_created:
+                    event_counts["FALLBACK_ADD"] = event_counts.get("FALLBACK_ADD", 0) + fallback_created
+                    chunk_created += fallback_created
+                    chunk_returned += fallback_created
+                    chunk_ignored = max(0, chunk_ignored - fallback_created)
+            created += chunk_created
+            updated += chunk_updated
+            archived += chunk_archived
+            ignored += chunk_ignored
+            returned += chunk_returned
+            unclassified += chunk_unclassified
+        return MemoryCurationResult(
+            created=created,
+            updated=updated,
+            archived=archived,
+            ignored=ignored,
             processed_entries=len(entries),
-            returned=counts.returned,
-            unclassified=counts.unclassified,
-            event_counts=dict(counts.event_counts),
+            returned=returned,
+            unclassified=unclassified,
+            event_counts=event_counts,
         )
-        if result.returned == 0 and self.api_client is not None:
-            fallback_created = self._curate_entries_with_fallback(model_entries)
-            if fallback_created:
-                event_counts = dict(result.event_counts or {})
-                event_counts["FALLBACK_ADD"] = event_counts.get("FALLBACK_ADD", 0) + fallback_created
-                result = MemoryCurationResult(
-                    created=result.created + fallback_created,
-                    updated=result.updated,
-                    archived=result.archived,
-                    ignored=max(0, result.ignored - fallback_created),
-                    processed_entries=result.processed_entries,
-                    returned=result.returned + fallback_created,
-                    unclassified=result.unclassified,
-                    event_counts=event_counts,
-                )
-        return result
 
     def _curate_entries_with_fallback(self, entries: list[dict[str, str]]) -> int:
         """mem0 抽取为空时，用主模型兜底抽取明确长期事实。"""
 
+        if not entries:
+            return 0
         prompt = _fallback_extraction_prompt(entries)
         try:
             raw = self.api_client.complete_raw(
@@ -183,22 +199,66 @@ class MemoryCurator:
         return created
 
 
+def _merge_event_counts(target: dict[str, int], source: dict[str, int]) -> None:
+    for key, value in source.items():
+        target[key] = target.get(key, 0) + value
+
+
+def _chunk_entries_for_curation(entries: list[ChatHistoryEntry]) -> list[list[ChatHistoryEntry]]:
+    chunks: list[list[ChatHistoryEntry]] = []
+    current: list[ChatHistoryEntry] = []
+    current_messages = 0
+    current_chars = 0
+    for entry in entries:
+        model_entry = _entry_for_model(entry)
+        if model_entry is None:
+            continue
+        entry_chars = _model_entry_char_count(model_entry)
+        if current and (
+            current_messages >= MAX_CURATION_CHUNK_MESSAGES
+            or current_chars + entry_chars > MAX_CURATION_CHUNK_CHARS
+        ):
+            chunks.append(current)
+            current = []
+            current_messages = 0
+            current_chars = 0
+        current.append(entry)
+        current_messages += 1
+        current_chars += entry_chars
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _entry_for_model(entry: ChatHistoryEntry) -> dict[str, str] | None:
+    if entry.role not in {"user", "assistant"}:
+        return None
+    content = entry.content.strip()
+    if not content:
+        return None
+    return {
+        "created_at": entry.created_at,
+        "role": entry.role,
+        "content": content,
+        "translation": entry.translation.strip(),
+    }
+
+
+def _model_entry_char_count(entry: dict[str, str]) -> int:
+    return (
+        len(entry.get("created_at", ""))
+        + len(entry.get("role", ""))
+        + len(entry.get("content", ""))
+        + len(entry.get("translation", ""))
+    )
+
+
 def _entries_for_model(entries: list[ChatHistoryEntry]) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     for entry in entries:
-        if entry.role not in {"user", "assistant"}:
-            continue
-        content = entry.content.strip()
-        if not content:
-            continue
-        result.append(
-            {
-                "created_at": entry.created_at,
-                "role": entry.role,
-                "content": content,
-                "translation": entry.translation.strip(),
-            }
-        )
+        model_entry = _entry_for_model(entry)
+        if model_entry is not None:
+            result.append(model_entry)
     return result
 
 

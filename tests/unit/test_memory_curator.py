@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+import threading
 from pathlib import Path
 import uuid
 
@@ -50,6 +52,45 @@ def test_memory_curator_falls_back_when_mem0_returns_no_results() -> None:
     assert fake.calls[1]["infer"] is False
     assert fake.calls[1]["messages"] == "用户妈妈的生日是6月4日。"
     assert fake.calls[1]["metadata"] == {"source": "curation_fallback"}
+
+
+def test_memory_curator_chunks_large_history_before_mem0() -> None:
+    fake = FakeMem0()
+    store = MemoryStore(
+        base_dir=_runtime_root("memory_curator_chunks"),
+        scope_id="sakura",
+        memory_client=fake,
+    )
+    curator = MemoryCurator(store)
+
+    result = curator.curate_entries([_entry("user", f"偏好 {index}") for index in range(35)])
+
+    assert result.created == 2
+    assert result.returned == 2
+    assert result.processed_entries == 35
+    assert [len(call["messages"]) for call in fake.calls] == [32, 3]
+
+
+def test_memory_delete_resets_mem0_curation_cache_for_current_scope() -> None:
+    fake = FakeMem0WithCurationCache()
+    store = MemoryStore(
+        base_dir=_runtime_root("memory_delete_cache"),
+        scope_id="sakura",
+        memory_client=fake,
+    )
+    fake.insert_message("user_id=sakura", "user", "旧上下文")
+    fake.insert_message("user_id=other", "user", "其它角色上下文")
+    fake.insert_history("memory-001", "ADD")
+    fake.insert_history("memory-other", "ADD")
+
+    result = store.forget_memory({"id": "memory-001"})
+
+    assert result["curation_cache_reset"] == {"messages": 1, "history": 1}
+    assert fake.deleted == ["memory-001"]
+    assert fake.count_messages("user_id=sakura") == 0
+    assert fake.count_messages("user_id=other") == 1
+    assert fake.count_history("memory-001") == 0
+    assert fake.count_history("memory-other") == 1
 
 
 def test_memory_curator_ignores_non_dialog_entries() -> None:
@@ -205,6 +246,99 @@ class EmptyMem0:
                 }
             ]
         }
+
+
+class FakeMem0WithCurationCache:
+    def __init__(self) -> None:
+        self.records: dict[str, dict[str, str]] = {
+            "memory-001": {"id": "memory-001", "memory": "第一条记忆"},
+        }
+        self.deleted: list[str] = []
+        self.db = FakeMem0Db()
+
+    def get(self, memory_id):  # type: ignore[no-untyped-def]
+        return self.records.get(memory_id)
+
+    def delete(self, memory_id):  # type: ignore[no-untyped-def]
+        self.deleted.append(memory_id)
+        self.records.pop(memory_id, None)
+
+    def insert_message(self, session_scope: str, role: str, content: str) -> None:
+        self.db.connection.execute(
+            "INSERT INTO messages (id, session_scope, role, content, name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), session_scope, role, content, None, "2026-06-05T00:00:00+00:00"),
+        )
+        self.db.connection.commit()
+
+    def insert_history(self, memory_id: str, event: str) -> None:
+        self.db.connection.execute(
+            "INSERT INTO history (id, memory_id, old_memory, new_memory, event, created_at, updated_at, is_deleted, actor_id, role) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                memory_id,
+                None,
+                "记忆",
+                event,
+                "2026-06-05T00:00:00+00:00",
+                None,
+                0,
+                None,
+                "user",
+            ),
+        )
+        self.db.connection.commit()
+
+    def count_messages(self, session_scope: str) -> int:
+        return int(
+            self.db.connection.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_scope = ?",
+                (session_scope,),
+            ).fetchone()[0]
+        )
+
+    def count_history(self, memory_id: str) -> int:
+        return int(
+            self.db.connection.execute(
+                "SELECT COUNT(*) FROM history WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchone()[0]
+        )
+
+
+class FakeMem0Db:
+    def __init__(self) -> None:
+        self.connection = sqlite3.connect(":memory:")
+        self._lock = threading.Lock()
+        self.connection.execute(
+            """
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                session_scope TEXT,
+                role TEXT,
+                content TEXT,
+                name TEXT,
+                created_at DATETIME
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE history (
+                id TEXT PRIMARY KEY,
+                memory_id TEXT,
+                old_memory TEXT,
+                new_memory TEXT,
+                event TEXT,
+                created_at DATETIME,
+                updated_at DATETIME,
+                is_deleted INTEGER,
+                actor_id TEXT,
+                role TEXT
+            )
+            """
+        )
+        self.connection.commit()
 
 
 class FakeFallbackApiClient:

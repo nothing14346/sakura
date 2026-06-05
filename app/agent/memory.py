@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 from app.storage.chat_history import ChatHistoryEntry
 
@@ -417,7 +419,8 @@ class MemoryStore:
         mem = self._get_memory()
         previous = _normalize_memory_record(mem.get(memory_id))
         mem.delete(memory_id)
-        return {"memory": previous or {"id": memory_id, "content": ""}}
+        cache_reset = self._reset_scope_curation_cache(mem, memory_ids=[memory_id])
+        return {"memory": previous or {"id": memory_id, "content": ""}, "curation_cache_reset": cache_reset}
 
     def forget_memory(self, arguments: dict[str, Any], *, wait: bool = True) -> dict[str, Any]:
         memory_id = _required_text(arguments, "id")
@@ -431,8 +434,17 @@ class MemoryStore:
             return self._loading_response()
         previous = _normalize_memory_record(mem.get(memory_id))
         mem.delete(memory_id)
+        cache_reset = self._reset_scope_curation_cache(mem, memory_ids=[memory_id])
         forgotten = previous or {"id": memory_id, "content": ""}
-        return {"forgotten": forgotten, "memory": forgotten}
+        return {"forgotten": forgotten, "memory": forgotten, "curation_cache_reset": cache_reset}
+
+    def reset_curation_cache(self, *, wait: bool = True) -> dict[str, int]:
+        """清理当前角色的 mem0 整理缓存，不影响 Sakura 自己的聊天历史文件。"""
+
+        mem = self._get_memory(wait=wait)
+        if mem is None:
+            return {"messages": 0, "history": 0}
+        return self._reset_scope_curation_cache(mem)
 
     def add_history_entries(self, entries: list[ChatHistoryEntry]) -> MemoryCurationCounts:
         messages = _entries_for_mem0(entries)
@@ -441,6 +453,56 @@ class MemoryStore:
         mem = self._get_memory()
         raw = mem.add(messages, user_id=self.scope_id, infer=True)
         return _count_mem0_events(raw, total=len(messages))
+
+    def _reset_scope_curation_cache(
+        self,
+        mem: Any,
+        *,
+        memory_ids: Iterable[str] | None = None,
+    ) -> dict[str, int]:
+        """清理 mem0 内部整理缓存，避免删除长期记忆后旧缓存继续参与抽取。"""
+
+        db = getattr(mem, "db", None)
+        connection = getattr(db, "connection", None)
+        if connection is None:
+            return {"messages": 0, "history": 0}
+
+        clean_memory_ids = [
+            memory_id
+            for memory_id in (str(item).strip() for item in (memory_ids or []))
+            if memory_id
+        ]
+        session_scope = _mem0_session_scope({"user_id": self.scope_id})
+        lock = getattr(db, "_lock", None)
+        context = lock if lock is not None else nullcontext()
+        deleted_messages = 0
+        deleted_history = 0
+
+        try:
+            with context:
+                connection.execute("BEGIN")
+                message_cursor = connection.execute(
+                    "DELETE FROM messages WHERE session_scope = ?",
+                    (session_scope,),
+                )
+                deleted_messages = max(0, int(message_cursor.rowcount or 0))
+                if clean_memory_ids:
+                    placeholders = ",".join("?" for _ in clean_memory_ids)
+                    history_cursor = connection.execute(
+                        f"DELETE FROM history WHERE memory_id IN ({placeholders})",
+                        clean_memory_ids,
+                    )
+                    deleted_history = max(0, int(history_cursor.rowcount or 0))
+                connection.execute("COMMIT")
+        except (sqlite3.Error, RuntimeError) as exc:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            logger.warning("mem0 整理缓存清理失败：%s", exc)
+            return {"messages": 0, "history": 0}
+
+        return {"messages": deleted_messages, "history": deleted_history}
 
     def _get_memory(self, *, wait: bool = True) -> Any | None:
         with self._lock:
@@ -625,6 +687,15 @@ def _resolve_base_dir(base_dir: Path | None) -> Path:
 def _normalize_scope_id(scope_id: str | None) -> str:
     text = (scope_id or "").strip()
     return text if text and not any(ch.isspace() for ch in text) else DEFAULT_MEMORY_SCOPE
+
+
+def _mem0_session_scope(filters: dict[str, str]) -> str:
+    parts: list[str] = []
+    for key in sorted(("user_id", "agent_id", "run_id")):
+        value = filters.get(key)
+        if value:
+            parts.append(f"{key}={value}")
+    return "&".join(parts)
 
 
 def _local_embedding_model_kwargs(model_name: str, base_dir: Path | None = None) -> dict[str, Any]:

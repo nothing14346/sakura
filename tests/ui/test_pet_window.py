@@ -3354,6 +3354,9 @@ def test_queued_history_clear_starts_after_auto_curation_cleanup(monkeypatch) ->
         _cleanup_memory_curation_worker = PetWindow._cleanup_memory_curation_worker
         _start_pending_history_clear_after_curation = PetWindow._start_pending_history_clear_after_curation
         _memory_store_ready_for_history_clear = PetWindow._memory_store_ready_for_history_clear
+        _reset_memory_curation_cache_for_history_clear = (
+            PetWindow._reset_memory_curation_cache_for_history_clear
+        )
 
         def __init__(self) -> None:
             self.memory_curation_worker = DisposableStub()
@@ -3449,6 +3452,52 @@ def test_history_clear_reports_when_memory_store_is_not_ready(monkeypatch) -> No
     assert window.start_calls == 0
     assert window.history_window.busy_calls == [False]
     assert messages == [("记忆初始化中", "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。")]
+
+
+def test_history_clear_resets_mem0_curation_cache_before_start() -> None:  # type: ignore[no-untyped-def]
+    from app.ui.pet_window import PetWindow
+
+    events: list[str] = []
+
+    class HistoryStoreStub:
+        def load(self) -> list[object]:
+            return [object()]
+
+    class MemoryStoreStub:
+        def is_ready(self) -> bool:
+            return True
+
+        def reset_curation_cache(self) -> dict[str, int]:
+            events.append("reset")
+            return {"messages": 1, "history": 0}
+
+    class MemoryCurationStateStub:
+        def pending_turns(self) -> int:
+            return 2
+
+    class WindowStub:
+        _save_history_to_memory_and_clear = PetWindow._save_history_to_memory_and_clear
+        _memory_store_ready_for_history_clear = PetWindow._memory_store_ready_for_history_clear
+        _reset_memory_curation_cache_for_history_clear = (
+            PetWindow._reset_memory_curation_cache_for_history_clear
+        )
+
+        def __init__(self) -> None:
+            self.memory_curation_thread = None
+            self.memory_curation_mode = ""
+            self.worker_thread = None
+            self.history_store = HistoryStoreStub()
+            self.memory_store = MemoryStoreStub()
+            self.history_window = None
+            self.memory_curation_state = MemoryCurationStateStub()
+
+        def _start_memory_curation(self, *_args, **_kwargs) -> None:
+            events.append("start")
+
+    window = WindowStub()
+    window._save_history_to_memory_and_clear()
+
+    assert events == ["reset", "start"]
 
 
 def test_show_settings_reloads_memory_in_background_when_api_changes(monkeypatch) -> None:  # type: ignore[no-untyped-def]

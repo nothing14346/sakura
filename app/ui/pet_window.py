@@ -2144,6 +2144,7 @@ class PetWindow(QWidget):
         if not self._memory_store_ready_for_history_clear():
             self._show_memory_not_ready_for_history_clear()
             return False
+        self._reset_memory_curation_cache_for_history_clear()
         self._start_memory_curation(
             entries,
             mode="history_clear",
@@ -2515,6 +2516,7 @@ class PetWindow(QWidget):
             if self.history_window is not None:
                 self.history_window.set_memory_save_busy(False)
             return
+        self._reset_memory_curation_cache_for_history_clear()
         self._start_memory_curation(
             entries,
             mode="history_clear",
@@ -2538,6 +2540,17 @@ class PetWindow(QWidget):
             "可能需要准备本地嵌入模型，请稍等就绪后再试。"
         )
         show_themed_information(self, "记忆初始化中", message)
+
+    def _reset_memory_curation_cache_for_history_clear(self) -> None:
+        reset_cache = getattr(self.memory_store, "reset_curation_cache", None)
+        if not callable(reset_cache):
+            return
+        try:
+            reset_counts = reset_cache()
+        except Exception as exc:  # noqa: BLE001
+            debug_log("Memory", "重置 mem0 整理缓存失败", {"error": str(exc)})
+            return
+        debug_log("Memory", "已重置 mem0 整理缓存", reset_counts)
 
     @Slot()
     def show_settings(self) -> None:
