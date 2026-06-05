@@ -1,4 +1,4 @@
-[English](README.en.md)
+[English](docs/README.en.md)
 
 # Sakura Desktop Pet
 
