@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QTimer, Slot
+from PySide6.QtCore import (
+    QEasingCurve,
+    QObject,
+    QPropertyAnimation,
+    QSequentialAnimationGroup,
+    QTimer,
+    Slot,
+)
 from PySide6.QtWidgets import QLabel
 
 from app.llm.chat_reply import ChatSegment
@@ -38,6 +45,7 @@ class SubtitleController(QObject):
         preload_segment: SegmentCallback | None = None,
         typing_interval_ms: int = SPEECH_TYPING_INTERVAL_MS,
         segment_pause_ms: int = REPLY_SEGMENT_PAUSE_MS,
+        bubble_opacity_effect: Any = None,
     ) -> None:
         super().__init__(parent)
         self.speech_label = speech_label
@@ -48,6 +56,9 @@ class SubtitleController(QObject):
         self._on_reply_completed = on_reply_completed
         self._should_complete_reply = should_complete_reply
         self._preload_segment = preload_segment
+        # 气泡淡入脉冲：用于每段台词浮现，None 时退化为无动画（测试/历史窗口单独构造安全）。
+        self._bubble_opacity_effect = bubble_opacity_effect
+        self._bubble_fade_anim: QSequentialAnimationGroup | None = None
 
         self.speech_text = ""
         self.speech_index = 0
@@ -101,13 +112,20 @@ class SubtitleController(QObject):
 
         self._start_reply_segments_now(clean_segments)
 
-    def cancel_reply_flow(self, placeholder_text: str | None = None) -> None:
+    def cancel_reply_flow(
+        self,
+        placeholder_text: str | None = None,
+        *,
+        transition: bool = False,
+    ) -> None:
         self.reply_sequence_id += 1
         self.pending_reply_segments = []
         self.queued_reply_segment_batches = []
         self.reset_current_segment_progress()
         if placeholder_text is not None:
-            self.set_speech(placeholder_text)
+            # transition=True 用于真正打断当前台词的场景（如通信失败），让新文本带轻微浮现；
+            # 发消息占位等高频路径用默认 False 瞬时切换，避免气泡频繁闪烁。
+            self.set_speech(placeholder_text, pulse=transition)
 
     def clear_queued_reply_segments_for_action_resolution(self) -> None:
         if not self.queued_reply_segment_batches:
@@ -139,7 +157,7 @@ class SubtitleController(QObject):
         self.subtitle_language = subtitle_language
 
     @Slot(str)
-    def set_speech(self, text: str) -> None:
+    def set_speech(self, text: str, *, pulse: bool = False) -> None:
         cleaned = " ".join(text.split())
         self.speech_timer.stop()
         self.speech_text = cleaned
@@ -147,7 +165,34 @@ class SubtitleController(QObject):
         self.speech_label.clear()
         if self.speech_text:
             self.speech_timer.start()
+            if pulse:
+                self._pulse_bubble()
         self._log_stage("speech_text_started", {"text": cleaned})
+
+    def _pulse_bubble(self) -> None:
+        """每段台词开始时让气泡做一次轻微"暗-亮"脉冲，营造浮现感（克制、不闪黑）。"""
+        effect = self._bubble_opacity_effect
+        if effect is None:
+            return
+        previous = self._bubble_fade_anim
+        if previous is not None:
+            previous.stop()
+            previous.deleteLater()
+        # fade_out 不设 startValue，从当前透明度起步，连续切换永不突跳。
+        fade_out = QPropertyAnimation(effect, b"opacity")
+        fade_out.setDuration(110)
+        fade_out.setEndValue(0.5)
+        fade_out.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        fade_in = QPropertyAnimation(effect, b"opacity")
+        fade_in.setDuration(130)
+        fade_in.setStartValue(0.5)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        group = QSequentialAnimationGroup(self)
+        group.addAnimation(fade_out)
+        group.addAnimation(fade_in)
+        group.start()
+        self._bubble_fade_anim = group
 
     def show_text_immediately(self, text: str) -> None:
         """立即显示完整字幕，用于历史回看，不触发 TTS 或分段推进。"""
@@ -165,7 +210,7 @@ class SubtitleController(QObject):
         self.reply_advance_token += 1
         self.current_segment_speech_done = False
         self.reply_advance_scheduled = False
-        self.set_speech(self.current_segment.display_text(self.subtitle_language))
+        self.set_speech(self.current_segment.display_text(self.subtitle_language), pulse=True)
 
     def reset_current_segment_progress(self) -> None:
         self.voice_playback.discard_prepared()
@@ -246,7 +291,7 @@ class SubtitleController(QObject):
             },
         )
         self._apply_segment(self.current_segment)
-        self.set_speech(self.current_segment.display_text(self.subtitle_language))
+        self.set_speech(self.current_segment.display_text(self.subtitle_language), pulse=True)
 
     def _mark_segment_speech_done(self, sequence_id: int) -> None:
         if sequence_id != self.reply_sequence_id or sequence_id != self.current_segment_sequence_id:

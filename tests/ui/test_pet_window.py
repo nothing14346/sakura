@@ -671,8 +671,8 @@ def test_pet_window_drag_maps_child_widget_anchor_to_window_coordinates() -> Non
             self.accepted = True
 
     class ChildWidgetStub:
-        def mapTo(self, _window, position):  # type: ignore[no-untyped-def]
-            return position + qtcore.QPoint(100, 80)
+        def mapToGlobal(self, position):  # type: ignore[no-untyped-def]
+            return position + qtcore.QPoint(200, 160)
 
     class MinimalWindow:
         _handle_mouse_press = PetWindow._handle_mouse_press
@@ -682,6 +682,9 @@ def test_pet_window_drag_maps_child_widget_anchor_to_window_coordinates() -> Non
         def __init__(self) -> None:
             self.drag_anchor = None
             self.move_positions: list[object] = []
+
+        def mapFromGlobal(self, position):  # type: ignore[no-untyped-def]
+            return position - qtcore.QPoint(100, 80)
 
         def move(self, position) -> None:  # type: ignore[no-untyped-def]
             self.move_positions.append(position)
@@ -6041,6 +6044,7 @@ def test_pet_window_syncs_macos_native_topmost_state(monkeypatch) -> None:  # ty
 
     class MinimalWindow:
         _sync_native_topmost_state = PetWindow._sync_native_topmost_state
+        _topmost_sync_windows = PetWindow._topmost_sync_windows
 
         always_on_top_enabled = True
 
@@ -6840,3 +6844,144 @@ def test_send_message_injects_runtime_event_context_before_user_message() -> Non
     assert history == [("user", "继续刚才的话题")]
     # 队列已被一次性消费
     assert len(window.runtime_event_queue) == 0
+
+
+def _qt_app_or_skip():  # type: ignore[no-untyped-def]
+    """统一获取/创建 QApplication；stub 环境下跳过。"""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QApplication") or not hasattr(qtwidgets, "QWidget"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+    return qtwidgets.QApplication.instance() or qtwidgets.QApplication([])
+
+
+def test_pet_input_stylesheet_reduces_white_overlay() -> None:
+    stylesheet = build_pet_window_stylesheet(DEFAULT_THEME_SETTINGS)
+    normal_start = stylesheet.index("#petInput {")
+    focus_start = stylesheet.index("#petInput:focus")
+    normal_block = stylesheet[normal_start:focus_start]
+    focus_block = stylesheet[focus_start:focus_start + 200]
+    # 普通态/聚焦态白底 alpha 应明显低于原始厚白（96/132），靠背后强模糊提供玻璃质感。
+    assert ", 55)" in normal_block
+    assert ", 90)" in focus_block
+
+
+def test_local_rect_to_global_keeps_size_and_uses_main_window_origin() -> None:
+    _qt_app_or_skip()
+    from PySide6.QtCore import QPoint, QRect
+    from PySide6.QtWidgets import QWidget
+    from app.ui.pet_window import PetWindow
+
+    host = QWidget()
+    host.move(100, 200)
+    rect = QRect(10, 20, 300, 128)
+
+    # 子窗口定位：本地矩形按主窗口原点转换为全局坐标，尺寸不变。
+    result = PetWindow._local_rect_to_global(host, rect)  # type: ignore[arg-type]
+
+    assert result.size() == rect.size()
+    assert result.topLeft() == host.mapToGlobal(QPoint(10, 20))
+    host.deleteLater()
+
+
+def test_input_bar_animator_visibility_follows_hover_and_pin() -> None:
+    _qt_app_or_skip()
+    from PySide6.QtWidgets import QWidget
+    from app.ui.input_bar_animator import InputBarAnimator
+
+    bar = QWidget()
+    window = QWidget()
+    pinned = {"value": False}
+    hover = {"value": False}
+    animator = InputBarAnimator(
+        bar,
+        window,
+        lambda: pinned["value"],
+        lambda: hover["value"],
+    )
+
+    animator._hover = False
+    assert animator._target_visible() is False
+
+    animator._hover = True
+    assert animator._target_visible() is True
+
+    # 鼠标移开但 pinned（有文本/待确认动作）时仍保持可见，不被收起。
+    animator._hover = False
+    pinned["value"] = True
+    assert animator._target_visible() is True
+
+    bar.deleteLater()
+    window.deleteLater()
+
+
+def test_input_bar_animator_send_feedback_starts_animation() -> None:
+    _qt_app_or_skip()
+    from PySide6.QtWidgets import QWidget
+    from app.ui.input_bar_animator import InputBarAnimator
+
+    bar = QWidget()
+    window = QWidget()
+    animator = InputBarAnimator(bar, window, lambda: False, lambda: False)
+
+    animator.play_send_feedback()
+    assert animator._send_anim is not None
+
+    bar.deleteLater()
+    window.deleteLater()
+
+
+class _StubVoicePlayback:
+    def discard_prepared(self) -> None:
+        pass
+
+    def speak_segment(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        pass
+
+    def prepare_next(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        pass
+
+
+def _build_subtitle_controller(effect):  # type: ignore[no-untyped-def]
+    from PySide6.QtWidgets import QLabel
+    from app.ui.subtitle_controller import SubtitleController
+
+    return SubtitleController(
+        QLabel(),
+        _StubVoicePlayback(),
+        "zh",
+        lambda *args: None,
+        lambda *args: None,
+        lambda: None,
+        lambda: False,
+        bubble_opacity_effect=effect,
+    )
+
+
+def test_subtitle_cancel_without_transition_keeps_bubble_opaque() -> None:
+    _qt_app_or_skip()
+    from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+    effect = QGraphicsOpacityEffect()
+    effect.setOpacity(1.0)
+    controller = _build_subtitle_controller(effect)
+
+    # 发送占位等高频路径 transition=False，不应触发气泡脉冲。
+    controller.cancel_reply_flow("......", transition=False)
+
+    assert controller._bubble_fade_anim is None
+    assert effect.opacity() == 1.0
+
+
+def test_subtitle_segment_pulse_creates_bubble_animation() -> None:
+    _qt_app_or_skip()
+    from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+    effect = QGraphicsOpacityEffect()
+    effect.setOpacity(1.0)
+    controller = _build_subtitle_controller(effect)
+
+    # 分段台词开始（pulse=True）应创建一次气泡浮现脉冲动画。
+    controller.set_speech("一段台词", pulse=True)
+
+    assert controller._bubble_fade_anim is not None

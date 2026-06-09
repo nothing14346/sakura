@@ -130,8 +130,9 @@ from app.storage.visual_observation import (
     should_inject_visual_context,
 )
 from app.ui.fonts import _rounded_chinese_font, _rounded_japanese_font
+from app.ui.input_bar_animator import InputBarAnimator
+from app.ui.acrylic_card_window import AcrylicCardWindow
 from app.ui import (
-    FrostedGlassFrame,
     ManualScreenshotOverlay,
     PortraitController,
     SubtitleController,
@@ -140,7 +141,12 @@ from app.ui import (
     capture_virtual_desktop_pixmap,
 )
 from app.ui.styles import pet_window_stylesheet
-from app.ui.theme import DEFAULT_THEME_SETTINGS, ThemeSettings, build_message_box_stylesheet
+from app.ui.theme import (
+    DEFAULT_THEME_SETTINGS,
+    ThemeSettings,
+    build_app_chrome_stylesheet,
+    build_message_box_stylesheet,
+)
 from app.voice import VoicePlaybackController
 
 if TYPE_CHECKING:
@@ -471,6 +477,10 @@ class PetWindow(QWidget):
 
         self.bubble = QFrame(self)
         self.bubble.setObjectName("speechBubble")
+        # 气泡整体透明度效果：驱动每段台词的浮现脉冲（透明窗口不能用 setWindowOpacity）。
+        self.bubble_opacity_effect = QGraphicsOpacityEffect(self.bubble)
+        self.bubble_opacity_effect.setOpacity(1.0)
+        self.bubble.setGraphicsEffect(self.bubble_opacity_effect)
 
         self.name_label = QLabel(self.character_profile.display_name, self.bubble)
         self.name_label.setObjectName("speakerName")
@@ -532,6 +542,7 @@ class PetWindow(QWidget):
             preload_segment=self.portrait_controller.preload_for_segment,
             typing_interval_ms=self.subtitle_typing_interval_ms,
             segment_pause_ms=self.reply_segment_pause_ms,
+            bubble_opacity_effect=self.bubble_opacity_effect,
         )
         self.speech_timer = self.subtitle_controller.speech_timer
         if not self.startup_initializing:
@@ -568,9 +579,8 @@ class PetWindow(QWidget):
         bubble_layout.setSpacing(0)
         bubble_layout.addLayout(bubble_body_layout, 1)
         self.bubble.setLayout(bubble_layout)
-
-        self.input_backdrop = FrostedGlassFrame(self)
-        self.input_backdrop.set_source_widgets((self.label, self.portrait_transition_label))
+        # 气泡独立为磨砂卡片子窗口：立绘保持透明悬浮，气泡背后由系统亚克力模糊真实桌面。
+        self.bubble_window = AcrylicCardWindow(self.bubble, activatable=False, parent=self)
 
         self.input_bar = QFrame(self)
         self.input_bar.setObjectName("inputBar")
@@ -613,6 +623,15 @@ class PetWindow(QWidget):
         input_layout.addWidget(self.screenshot_button)
         input_layout.addWidget(self.send_button)
         self.input_bar.setLayout(input_layout)
+        # 输入栏独立为可激活的磨砂卡片子窗口（可聚焦打字），默认收起、hover 浮现。
+        self.input_window = AcrylicCardWindow(self.input_bar, activatable=True, parent=self)
+        self.input_bar_animator = InputBarAnimator(
+            self.input_bar,
+            self.input_window,
+            self._input_bar_pinned,
+            self._cursor_in_pet_region,
+            parent=self,
+        )
         self._sync_plugin_chat_ui_widgets()
 
         self._apply_theme_settings(self.theme_settings)
@@ -646,8 +665,17 @@ class PetWindow(QWidget):
         super().resizeEvent(event)
         self._layout_stage()
 
+    def moveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().moveEvent(event)
+        self._reposition_child_windows()
+
     def showEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().showEvent(event)
+        if hasattr(self, "bubble_window"):
+            self._reposition_child_windows()
+            self.bubble_window.show()
+        if hasattr(self, "input_bar_animator"):
+            self.input_bar_animator.start()
         self._refresh_tray_menu()
         self._schedule_native_topmost_sync()
         if getattr(self, "memory_failure_dialog_pending_message", ""):
@@ -655,6 +683,10 @@ class PetWindow(QWidget):
 
     def hideEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().hideEvent(event)
+        if hasattr(self, "bubble_window"):
+            self.bubble_window.hide()
+        if hasattr(self, "input_window"):
+            self.input_window.hide()
         self._refresh_tray_menu()
 
     def changeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -820,9 +852,11 @@ class PetWindow(QWidget):
         if source_widget is None or source_widget is self:
             return position
 
-        map_to = getattr(source_widget, "mapTo", None)
-        if callable(map_to):
-            return map_to(self, position)
+        # source 可能在独立子窗口（气泡卡片）里，经全局坐标中转到主窗口本地坐标，
+        # 对跨窗口控件也有效（mapTo 仅对同一窗口内的后代有效）。
+        map_to_global = getattr(source_widget, "mapToGlobal", None)
+        if callable(map_to_global):
+            return self.mapFromGlobal(map_to_global(position))
         return position
 
     def _schedule_screen_change_relayout(self) -> None:
@@ -967,9 +1001,29 @@ class PetWindow(QWidget):
         )
 
     def _raise_foreground_controls(self) -> None:
-        self.bubble.raise_()
-        self.input_backdrop.raise_()
-        self.input_bar.raise_()
+        if hasattr(self, "bubble_window"):
+            self.bubble_window.raise_()
+        if hasattr(self, "input_window"):
+            self.input_window.raise_()
+        self._raise_open_dialogs()
+
+    def _raise_open_dialogs(self) -> None:
+        # 设置/历史窗口打开时应始终在桌宠卡片之上，避免说话时被卡片盖住。
+        for dialog in (
+            getattr(self, "settings_dialog", None),
+            getattr(self, "history_window", None),
+        ):
+            if dialog is not None and dialog.isVisible():
+                dialog.raise_()
+
+    def _any_dialog_open(self) -> bool:
+        for dialog in (
+            getattr(self, "settings_dialog", None),
+            getattr(self, "history_window", None),
+        ):
+            if dialog is not None and dialog.isVisible():
+                return True
+        return False
 
     def _update_tray_icon_pixmap(self, pixmap: QPixmap) -> None:
         _ = pixmap
@@ -1012,20 +1066,55 @@ class PetWindow(QWidget):
         input_gap = 10
         bubble_x = (width - bubble_width) // 2
         bubble_y = height - bubble_height - input_height - input_gap - 84
-        self.bubble.setGeometry(QRect(bubble_x, bubble_y, bubble_width, bubble_height))
-        self.bubble.raise_()
+        self._bubble_local_rect = QRect(bubble_x, bubble_y, bubble_width, bubble_height)
 
         input_y = bubble_y + bubble_height + input_gap
-        self.input_bar.setGeometry(QRect(bubble_x, input_y, bubble_width, input_height))
-        self._update_input_backdrop_geometry()
-        self.input_bar.raise_()
+        self._input_local_rect = QRect(bubble_x, input_y, bubble_width, input_height)
+        self._reposition_child_windows()
 
-    def _update_input_backdrop_geometry(self) -> None:
-        self.input_bar.layout().activate()
-        input_top_left = self.input_edit.mapTo(self, QPoint(0, 0))
-        self.input_backdrop.setGeometry(QRect(input_top_left, self.input_edit.size()))
-        self.input_backdrop.raise_()
-        self.input_backdrop.update()
+    def _reposition_child_windows(self) -> None:
+        # 气泡/输入栏是独立顶层卡片窗口，用全局坐标跟随主窗口定位。
+        bubble_rect = getattr(self, "_bubble_local_rect", None)
+        if bubble_rect is not None and hasattr(self, "bubble_window"):
+            self.bubble_window.setGeometry(self._local_rect_to_global(bubble_rect))
+        input_rect = getattr(self, "_input_local_rect", None)
+        if input_rect is not None and hasattr(self, "input_window"):
+            self.input_window.setGeometry(self._local_rect_to_global(input_rect))
+
+    def _local_rect_to_global(self, rect: QRect) -> QRect:
+        return QRect(self.mapToGlobal(rect.topLeft()), rect.size())
+
+    def _cursor_in_pet_region(self) -> bool:
+        # 设置/历史窗口打开时禁用输入栏浮现，避免盖住对话框。
+        if self._any_dialog_open():
+            return False
+        # 光标是否落在桌宠任一可见窗口内（主窗口立绘 ∪ 气泡卡片 ∪ 输入栏卡片），
+        # 避免鼠标移到气泡卡片上时输入栏误收起。
+        pos = QCursor.pos()
+        for window in (
+            self,
+            getattr(self, "bubble_window", None),
+            getattr(self, "input_window", None),
+        ):
+            if window is not None and window.isVisible() and window.frameGeometry().contains(pos):
+                return True
+        return False
+
+    def _input_bar_pinned(self) -> bool:
+        """输入栏在以下任一情况保持常显，避免用户操作中途被收起。
+
+        注意：不把「对话进行中(active_interaction_id)」算进来——输入框的显隐只跟随用户意图
+        （hover/焦点/有文本/待确认动作），不受桌宠讲话或请求影响。
+        """
+        # 设置/历史窗口打开时不固定输入栏，配合 hover 禁用一起彻底收起。
+        if self._any_dialog_open():
+            return False
+        return (
+            self.input_edit.hasFocus()
+            or bool(self.input_edit.text().strip())
+            # 用待确认动作状态而非 panel.isVisible()：输入栏卡片收起时 panel 的可见性会假阴性。
+            or self.pending_tool_action is not None
+        )
 
     def _create_tray_icon(self) -> None:
         icon = _build_status_tray_icon(self.theme_settings.primary_color)
@@ -1289,6 +1378,9 @@ class PetWindow(QWidget):
         exit_reply_history_review = getattr(self, "_exit_reply_history_review", None)
         if exit_reply_history_review is not None:
             exit_reply_history_review()
+        animator = getattr(self, "input_bar_animator", None)
+        if animator is not None:
+            animator.play_send_feedback()
         self.input_edit.clear()
         self._log_interaction_stage("input_cleared")
         self.subtitle_controller.cancel_reply_flow("......")
@@ -1716,7 +1808,8 @@ class PetWindow(QWidget):
         self.pending_tool_action = action
         has_action = action is not None
         self.tool_confirmation_panel.set_action(action)
-        self._update_input_backdrop_geometry()
+        if hasattr(self, "input_bar_animator"):
+            self.input_bar_animator.sync()
         panel_state = self.tool_confirmation_panel.state_snapshot()
         debug_log(
             "PetWindow",
@@ -2008,7 +2101,9 @@ class PetWindow(QWidget):
         if self.messages and self.messages[-1]["role"] == "user":
             self.messages.pop()
         self._record_history("error", message)
-        self.subtitle_controller.cancel_reply_flow("……通信に失敗した。設定を確認して。")
+        self.subtitle_controller.cancel_reply_flow(
+            "……通信に失敗した。設定を確認して。", transition=True
+        )
         show_themed_warning(self, "请求失败", message)
         self._end_interaction("error")
 
@@ -2649,6 +2744,8 @@ class PetWindow(QWidget):
             )
         self.history_window.set_subtitle_language(self.subtitle_language)
         self.history_window.set_theme_settings(self.theme_settings)
+        # 始终置顶，避免被桌宠卡片（同为置顶窗口）盖住。
+        _mark_dialog_always_on_top(self.history_window)
         self.history_window.refresh()
         self.history_window.show()
         self.history_window.raise_()
@@ -2757,6 +2854,8 @@ class PetWindow(QWidget):
             startup_settings=getattr(self, "startup_settings", StartupSettings()),
         )
         self.settings_dialog = dialog
+        # 始终置顶，避免被桌宠卡片（同为置顶窗口）盖住。
+        _mark_dialog_always_on_top(dialog)
         try:
             dialog_result = dialog.exec()
         finally:
@@ -3251,15 +3350,27 @@ class PetWindow(QWidget):
                 swp_no_activate = 0x0010
                 insert_after = hwnd_topmost if self.always_on_top_enabled else hwnd_notopmost
                 flags = swp_no_size | swp_no_move | swp_no_activate
-                ctypes.windll.user32.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags)
+                for window in self._topmost_sync_windows():
+                    ctypes.windll.user32.SetWindowPos(
+                        int(window.winId()), insert_after, 0, 0, 0, 0, flags
+                    )
             except Exception as exc:  # noqa: BLE001
                 debug_log("PetWindow", "同步原生置顶状态失败", {"error": str(exc)})
             return
         if sys.platform == "darwin":
             try:
-                _set_macos_window_topmost(int(self.winId()), self.always_on_top_enabled)
+                for window in self._topmost_sync_windows():
+                    _set_macos_window_topmost(int(window.winId()), self.always_on_top_enabled)
             except Exception as exc:  # noqa: BLE001
                 debug_log("PetWindow", "同步 macOS 原生置顶状态失败", {"error": str(exc)})
+
+    def _topmost_sync_windows(self):
+        # 置顶状态需覆盖主窗口 + 气泡/输入栏卡片子窗口，避免一个置顶一个不置顶被盖。
+        windows = [self]
+        for window in (getattr(self, "bubble_window", None), getattr(self, "input_window", None)):
+            if window is not None:
+                windows.append(window)
+        return windows
 
     def _apply_portrait_scale_percent(self, portrait_scale_percent: int) -> None:
         self.portrait_scale_percent = normalize_portrait_scale_percent(portrait_scale_percent)
@@ -3291,10 +3402,33 @@ class PetWindow(QWidget):
     def _apply_theme_settings(self, theme_settings: ThemeSettings) -> None:
         self.theme_settings = (theme_settings or DEFAULT_THEME_SETTINGS).normalized()
         self.setStyleSheet(pet_window_stylesheet(self.theme_settings))
+        self._apply_app_chrome_stylesheet()
+        self._apply_card_window_theme()
         if self.history_window is not None:
             self.history_window.set_theme_settings(self.theme_settings)
         if hasattr(self, "tray_icon"):
             self.tray_icon.setIcon(_build_status_tray_icon(self.theme_settings.primary_color))
+
+    def _apply_app_chrome_stylesheet(self) -> None:
+        # 全局美化下拉弹窗与滚动条：这些是独立顶层控件，对话框级样式传播不到，
+        # 且 app 用 Fusion 风格后系统原生外观失效，只能在 QApplication 级统一设置。
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(build_app_chrome_stylesheet(self.theme_settings))
+
+    def _apply_card_window_theme(self) -> None:
+        # 独立顶层卡片窗口不继承主窗口样式，需各自 setStyleSheet 并按主题色重应用磨砂底。
+        stylesheet = pet_window_stylesheet(self.theme_settings)
+        tint = self._card_tint()
+        for window in (getattr(self, "bubble_window", None), getattr(self, "input_window", None)):
+            if window is not None:
+                window.set_theme(stylesheet, tint)
+
+    def _card_tint(self) -> QColor:
+        # 亚克力磨砂底色：从气泡背景色派生，alpha 偏低让背后桌面更通透、磨砂更淡。
+        tint = QColor(self.theme_settings.bubble_background_color)
+        tint.setAlpha(55)
+        return tint
 
     def _apply_character(self, profile: CharacterProfile) -> None:
         previous_character_id = self.character_profile.id
@@ -3665,6 +3799,13 @@ def _theme_settings_for_character(
     if profile.theme_source == THEME_SOURCE_PACKAGE:
         return (profile.theme_settings or DEFAULT_THEME_SETTINGS).normalized()
     return saved_settings.normalized()
+
+
+def _mark_dialog_always_on_top(window) -> None:  # type: ignore[no-untyped-def]
+    # 给设置/历史窗口加置顶标志，使其与桌宠卡片同处置顶层、再靠 raise 保持在最上。
+    set_flag = getattr(window, "setWindowFlag", None)
+    if callable(set_flag):
+        set_flag(Qt.WindowType.WindowStaysOnTopHint, True)
 
 
 def _set_macos_window_topmost(window_id: int, enabled: bool) -> None:
