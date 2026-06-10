@@ -927,6 +927,91 @@ def test_portrait_controller_scales_pixmap_by_configured_percent() -> None:
     app.processEvents()
 
 
+def test_portrait_controller_never_resizes_parent_window() -> None:
+    """方案2 契约：PortraitController 只贴立绘 + relayout，绝不 resize 主窗口。
+
+    主窗口几何统一由 PetWindow 以底边为锚点管理；若控制器再做左上锚点 resize，
+    会与底边锚点几何相互打架，产生切表情/缩放时的偶发跳闪。此处把宿主尺寸设成与
+    stage_size 不同的哨兵值，验证 apply_current 后宿主尺寸保持不变，且 relayout 仍被调用。
+    """
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    qtgui = pytest.importorskip("PySide6.QtGui")
+    qtcore = pytest.importorskip("PySide6.QtCore")
+    if not all(
+        hasattr(qtwidgets, name)
+        for name in ("QApplication", "QGraphicsOpacityEffect", "QLabel", "QWidget")
+    ):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.config.character_loader import CharacterProfile
+    from app.ui.portrait_controller import PortraitController
+
+    QApplication = qtwidgets.QApplication
+    QGraphicsOpacityEffect = qtwidgets.QGraphicsOpacityEffect
+    QLabel = qtwidgets.QLabel
+    QWidget = qtwidgets.QWidget
+    QPixmap = qtgui.QPixmap
+    Qt = qtcore.Qt
+    app = QApplication.instance() or QApplication([])
+
+    tmp_path = (
+        Path(__file__).resolve().parents[2]
+        / "temp"
+        / "test_runtime"
+        / "portrait_no_resize"
+        / uuid.uuid4().hex
+    )
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    portrait_path = tmp_path / "portrait.png"
+    source = QPixmap(1000, 1000)
+    source.fill(Qt.GlobalColor.white)
+    assert source.save(str(portrait_path))
+
+    profile = CharacterProfile(
+        id="demo",
+        display_name="Demo",
+        package_dir=tmp_path,
+        card_path=tmp_path / "card.md",
+        initial_message="hello",
+        default_portrait_path=portrait_path,
+    )
+    host = QWidget()
+    main_label = QLabel(host)
+    transition_label = QLabel(host)
+    relayout_calls = {"count": 0}
+
+    def _relayout() -> None:
+        relayout_calls["count"] += 1
+
+    controller = PortraitController(
+        profile=profile,
+        parent_widget=host,
+        main_label=main_label,
+        transition_label=transition_label,
+        main_opacity_effect=QGraphicsOpacityEffect(main_label),
+        transition_opacity_effect=QGraphicsOpacityEffect(transition_label),
+        # stage_size 故意区别于下面的哨兵尺寸，若控制器误 resize 会被立即发现。
+        stage_size=(860, 640),
+        relayout=_relayout,
+        raise_foreground=lambda: None,
+        on_portrait_changed=lambda _pixmap: None,
+    )
+
+    sentinel_size = qtcore.QSize(321, 234)
+    host.resize(sentinel_size)
+    assert host.size() == sentinel_size
+
+    controller.apply_current()
+
+    # 关键断言：宿主尺寸未被改成 stage_size，仍是哨兵尺寸；relayout 仍被调用。
+    assert host.size() == sentinel_size
+    assert relayout_calls["count"] >= 1
+
+    host.deleteLater()
+    app.processEvents()
+
+
 def test_pet_window_loads_normalized_portrait_scale_percent() -> None:
     from app.ui.pet_window import PetWindow
 

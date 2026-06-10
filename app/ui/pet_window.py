@@ -710,6 +710,10 @@ class PetWindow(QWidget):
         ):
             drag_widget.installEventFilter(self)
 
+        # 初始窗口尺寸此前唯一依赖 apply_current 内部的 resize；方案2 把几何收口到
+        # PetWindow 后，这里显式设定初始尺寸。位置稍后由 _move_to_default_position 处理，
+        # 故此处平铺 resize 即可，无需底边锚点。
+        self.resize(*self.stage_size)
         self.portrait_controller.apply_current()
         self._create_tray_icon()
         self.memory_status_changed.connect(self._handle_memory_status_changed)
@@ -1180,10 +1184,17 @@ class PetWindow(QWidget):
         new_w, new_h = new_size
         delta_h = new_h - self.height()
         pos = self.pos()
+        # setUpdatesEnabled(False) 抑制 setGeometry 期间的中间帧绘制：在同一抑制区间内把
+        # 窗口几何与立绘/子窗口位置都更新到最终状态，再统一恢复绘制。否则 moveEvent 若先于
+        # resizeEvent 触发，此刻窗口原点已上移但立绘 label 仍在旧局部坐标，会被合成出一帧
+        # 向上错位（即变高时立绘向上闪一下）。
         self._repositioning_stage = True
+        self.setUpdatesEnabled(False)
         try:
             self.setGeometry(pos.x(), pos.y() - delta_h, new_w, new_h)
+            self._layout_stage()
         finally:
+            self.setUpdatesEnabled(True)
             self._repositioning_stage = False
 
     def _fit_bubble_for_label_height(self, label_h: int) -> None:
@@ -3758,14 +3769,26 @@ class PetWindow(QWidget):
 
     def _apply_portrait_scale_percent(self, portrait_scale_percent: int) -> None:
         self.portrait_scale_percent = normalize_portrait_scale_percent(portrait_scale_percent)
+        # 扩展态下必须沿用当前有效气泡高度（自适应优先），不能用 self.bubble_height。
+        # 否则用较小的设置值算出的舞台会让 apply_current 的左上锚点 resize 把窗口从底部
+        # 缩掉，紧接着 _apply_control_panel_layout 的底边锚点 resize 又以被抬高后的底边
+        # 重新撑起，每次滑块预览都向上漏掉一截，导致桌宠持续上移飞出屏幕。
+        effective_bubble_height = (
+            self._auto_fit_bubble_height
+            if self._auto_fit_bubble_height is not None
+            else self.bubble_height
+        )
         self.stage_size = _stage_size_for_layout(
             self.portrait_scale_percent,
             self.control_panel_width,
-            self.bubble_height,
+            effective_bubble_height,
             self.input_bar_offset,
         )
         self.portrait_controller.set_stage_size(self.stage_size)
         self.portrait_controller.set_portrait_scale_percent(self.portrait_scale_percent)
+        # apply_current 不再 resize 主窗口，立绘缩放改由底边锚点驱动窗口高度变化：
+        # 底边固定、立绘不随之下移，也不会与设置面板的底边锚点 resize 相互漏帧上移。
+        self._resize_stage_anchor_bottom(self.stage_size)
         self.portrait_controller.apply_current()
 
     def _apply_control_panel_layout(

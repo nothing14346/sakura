@@ -80,13 +80,14 @@ class PortraitController(QObject):
         self.transition_id = 0
 
     def apply_current(self) -> None:
+        # 主窗口几何统一由 PetWindow 以底边为锚点管理（见 _resize_stage_anchor_bottom）。
+        # 这里只负责把当前立绘贴到主标签并重新布局，绝不再 resize 主窗口，
+        # 避免左上锚点 resize 与底边锚点几何相互打架产生偶发跳闪。
         self._stop_transition()
         if self.pixmap.isNull():
-            self.parent_widget.resize(*self.stage_size)
             return
 
         self._apply_pixmap_to_label(self.main_label, self.pixmap)
-        self.parent_widget.resize(*self.stage_size)
         self._relayout()
 
     def set_stage_size(self, stage_size: tuple[int, int]) -> None:
@@ -160,7 +161,7 @@ class PortraitController(QObject):
             return
 
         self._apply_pixmap_to_label(self.transition_label, self.pixmap)
-        self.parent_widget.resize(*self.stage_size)
+        # 不再 resize 主窗口：交叉淡入期间舞台尺寸不变，几何由 PetWindow 收口。
         self._relayout()
         self.main_opacity_effect.setOpacity(1.0)
         self.transition_opacity_effect.setOpacity(0.0)
@@ -212,7 +213,6 @@ class PortraitController(QObject):
         self.transition_opacity_effect.setOpacity(0.0)
         if finish_current and not self.pixmap.isNull():
             self._apply_pixmap_to_label(self.main_label, self.pixmap)
-            self.parent_widget.resize(*self.stage_size)
             self._relayout()
 
     def _finish_transition(self, transition_id: int) -> None:
