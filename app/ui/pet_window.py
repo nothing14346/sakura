@@ -1162,6 +1162,17 @@ class PetWindow(QWidget):
             return
         self.speech_label.setFont(_rounded_japanese_font(15, QFont.Weight.Medium))
 
+    def _resize_stage_anchor_bottom(self, new_size: tuple[int, int]) -> None:
+        """调整舞台尺寸，以底边为锚点向上增长（立绘屏幕位置保持不变）。
+
+        直接 resize() 锚点在左上角，高度增加时底边下移导致立绘一起下移。
+        改为同步修正窗口 y 坐标：Δy = -(new_h - old_h)，底边固定。
+        """
+        new_w, new_h = new_size
+        delta_h = new_h - self.height()
+        pos = self.pos()
+        self.setGeometry(pos.x(), pos.y() - delta_h, new_w, new_h)
+
     def _fit_bubble_for_label_height(self, label_h: int) -> None:
         """打字机溢出回调：按标签实际高度逐行扩展气泡（不持久化、不超上限）。"""
         name_h = self.name_label.sizeHint().height()
@@ -1177,7 +1188,7 @@ class PetWindow(QWidget):
             return
         self._auto_fit_bubble_height = new_h
         self._ensure_stage_for_bubble_height(new_h)
-        # resize() 触发 resizeEvent → _layout_stage()，无需再手动调用
+        # setGeometry 触发 resizeEvent → _layout_stage()，无需再手动调用
 
     def _ensure_stage_for_bubble_height(self, bubble_height: int) -> None:
         """必要时调整舞台尺寸以容纳指定气泡高度。"""
@@ -1191,7 +1202,7 @@ class PetWindow(QWidget):
             return
         self.stage_size = new_size
         self.portrait_controller.set_stage_size(new_size)
-        self.resize(*new_size)
+        self._resize_stage_anchor_bottom(new_size)
 
     def _layout_stage(self) -> None:
         width = self.width()
@@ -3709,6 +3720,7 @@ class PetWindow(QWidget):
         self.portrait_controller.set_stage_size(self.stage_size)
         self.portrait_controller.set_portrait_scale_percent(self.portrait_scale_percent)
         self.portrait_controller.apply_current()
+        self._resize_stage_anchor_bottom(self.stage_size)
 
     def _apply_control_panel_layout(
         self,
@@ -3743,7 +3755,7 @@ class PetWindow(QWidget):
             self.input_bar_offset,
         )
         self.portrait_controller.set_stage_size(self.stage_size)
-        self.resize(*self.stage_size)
+        self._resize_stage_anchor_bottom(self.stage_size)
         self._layout_stage()
         if changed and persist:
             self._save_control_panel_layout()
