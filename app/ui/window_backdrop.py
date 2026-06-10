@@ -68,16 +68,28 @@ class MacOSVisualEffectBackdrop:
     PyObjC 内置完整的 Objective-C 类型编码支持，能够正确处理所有 struct 传参。
 
     参照 pyqt-liquidglass (https://github.com/kotikotprojects/pyqt-liquidglass) 方案：
-    1. 用 objc.objc_object 获取 Qt 窗口的 NSView/NSWindow
-    2. 创建 NSVisualEffectView 并添加到 contentView
-    3. 配置窗口透明属性（setOpaque, clearColor, titlebarAppearsTransparent）
-    4. 把 effect view 放在 Qt 内容之下
+
+    **为什么要用 Content Swap 而不是直接改 NSWindow 透明属性？**
+
+    如果直接设置 NSWindow.setOpaque_(False) + setBackgroundColor_(clearColor())，
+    整个窗口的 backing store 进入 ARGB 全透明模式。Qt 在 macOS 上通过 CoreText/Metal
+    渲染文字和控件时，依赖窗口背景做 alpha 混合。背景全透明 → premultiplied alpha
+    全部归零 → 所有内容肉眼不可见（毛玻璃可见，内容消失）。
+
+    Content Swap 方案：
+    1. 创建一个新的透明 NSView 作为容器
+    2. 替换 NSWindow 的 contentView
+    3. 把 Qt 的 root_view 和 NSVisualEffectView 都加入容器
+    4. effect view 放在 root_view 下面（sibling 关系，不是父子）
+    5. 容器自身透明，但 NSWindow 不透明 → Qt 渲染正常
 
     任何调用失败都静默降级到 FallbackTintBackdrop。
     """
 
     def __init__(self) -> None:
         self._effect_view: object | None = None
+        self._container: object | None = None
+        self._original_content_view: object | None = None
         self._fallback = FallbackTintBackdrop()
 
     def apply(self, window: QWidget, tint: QColor) -> None:
@@ -92,57 +104,78 @@ class MacOSVisualEffectBackdrop:
             import objc  # pyobjc-core
             from AppKit import (
                 NSColor,
+                NSView,
                 NSVisualEffectBlendingModeBehindWindow,
-                NSVisualEffectMaterialPopover,
+                NSVisualEffectMaterialUnderWindowBackground,
                 NSVisualEffectStateActive,
                 NSVisualEffectView,
             )
             from Foundation import NSMakeRect
 
-            # 1. 用 PyObjC 获取 Qt 窗口的 NSView
+            # 1. 用 PyObjC 获取 Qt 窗口的 NSView（root_view）
             win_id = int(window.winId())
-            ns_view = objc.objc_object(c_void_p=c_void_p(win_id))
+            root_view = objc.objc_object(c_void_p=c_void_p(win_id))
 
-            # 2. 获取 NSWindow
-            ns_window = ns_view.window()
+            # 2. 获取 NSWindow 和 contentView
+            ns_window = root_view.window()
             if ns_window is None:
                 self._fallback.apply(window, tint)
                 return
 
-            # 3. 获取 contentView
             content_view = ns_window.contentView()
             if content_view is None:
                 self._fallback.apply(window, tint)
                 return
 
-            # 4. 创建 NSVisualEffectView，使用窗口尺寸
+            # ── Content Swap ──
+            # 创建一个新的透明容器，替换 NSWindow 的 contentView，
+            # 然后把 Qt 的 root_view 和 NSVisualEffectView 都加入新容器。
+            from Foundation import NSMakeRect
+
             frame_w = float(window.width())
             frame_h = float(window.height())
-            frame = NSMakeRect(0.0, 0.0, frame_w, frame_h)
+            container_frame = NSMakeRect(0.0, 0.0, frame_w, frame_h)
 
-            effect_view = NSVisualEffectView.alloc().initWithFrame_(frame)
+            container = NSView.alloc().initWithFrame_(container_frame)
+            if container is None:
+                self._fallback.apply(window, tint)
+                return
+
+            container.setAutoresizingMask_(2 | 16)  # NSViewWidthSizable | NSViewHeightSizable
+            container.setWantsLayer_(True)
+
+            # 保存原始 contentView，用于 remove 时恢复
+            self._original_content_view = content_view
+
+            # 替换 contentView
+            ns_window.setContentView_(container)
+
+            # 把 Qt 的 root_view 加入容器（撑满）
+            root_view.setFrame_(container.bounds())
+            root_view.setAutoresizingMask_(2 | 16)
+            container.addSubview_(root_view)
+
+            # ── 创建 NSVisualEffectView ──
+            effect_frame = NSMakeRect(0.0, 0.0, frame_w, frame_h)
+            effect_view = NSVisualEffectView.alloc().initWithFrame_(effect_frame)
             if effect_view is None:
                 self._fallback.apply(window, tint)
                 return
 
-            effect_view.setMaterial_(NSVisualEffectMaterialPopover)
+            # 使用 UnderWindowBackground 材质（窗口背景毛玻璃），
+            # 比 Popover 更适合作为窗口底色。
+            effect_view.setMaterial_(NSVisualEffectMaterialUnderWindowBackground)
             effect_view.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
             effect_view.setState_(NSVisualEffectStateActive)
-            effect_view.setAutoresizingMask_(2 | 16)  # NSViewWidthSizable | NSViewHeightSizable
+            effect_view.setAutoresizingMask_(2 | 16)
 
-            # 5. 配置 NSWindow 透明属性（让毛玻璃可以透过窗口显示）
-            ns_window.setOpaque_(False)
-            ns_window.setBackgroundColor_(NSColor.clearColor())
-            ns_window.setTitlebarAppearsTransparent_(True)
-            # 启用全屏内容视图 (NSFullSizeContentViewWindowMask = 1 << 15)
-            current_mask = ns_window.styleMask()
-            ns_window.setStyleMask_(current_mask | (1 << 15))
-
-            # 6. 把 effect view 放在 contentView 最底层（Qt 内容在上面）
-            # NSViewBelow = -1 (NSWindowBelow), 0 = nil
-            content_view.addSubview_positioned_relativeTo_(effect_view, -1, None)
+            # ── 关键：effect view 放在 root_view 下面 ──
+            # 使用 sibling 关系：effect view 是 container 的子视图，排在 root_view 之下。
+            # NSWindowBelow = -1
+            container.addSubview_positioned_relativeTo_(effect_view, -1, root_view)
 
             self._effect_view = effect_view
+            self._container = container
 
         except Exception as exc:  # noqa: BLE001
             debug_log("UI", "macOS NSVisualEffectView 创建失败，降级为半透明", {"error": str(exc)})
@@ -157,6 +190,18 @@ class MacOSVisualEffectBackdrop:
                 pass
             finally:
                 self._effect_view = None
+        # 恢复原始 contentView
+        if self._original_content_view is not None and self._container is not None:
+            try:
+                # 从 container 中找到 NSWindow
+                ns_window = self._container.window()
+                if ns_window is not None:
+                    ns_window.setContentView_(self._original_content_view)
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                self._container = None
+                self._original_content_view = None
 
     def supports_native_blur(self) -> bool:
         return True
