@@ -983,8 +983,8 @@ class PetWindow(QWidget):
         self._schedule_native_topmost_sync()
 
     def _apply_reply_segment(self, segment: ChatSegment) -> None:
-        # 新台词段开始：重置自适应高度，让气泡从用户设置高度重新随打字机扩展。
-        self._auto_fit_bubble_height = None
+        # 同轮回复内各段高度延续：不在此重置，避免"段间先缩后扩"产生闪现。
+        # 高度重置由 _collapse_auto_fit_bubble_height 在 cancel_reply_flow 前统一处理。
         self.portrait_controller.apply_for_segment(segment)
         self._sync_reply_history_index_for_segment(segment)
         # 新台词开始：保持气泡显示并暂停自动隐藏倒计时。
@@ -1204,18 +1204,47 @@ class PetWindow(QWidget):
         # setGeometry 触发 resizeEvent → _layout_stage()，无需再手动调用
 
     def _ensure_stage_for_bubble_height(self, bubble_height: int) -> None:
-        """必要时调整舞台尺寸以容纳指定气泡高度。"""
+        """必要时扩大舞台以容纳气泡高度；若窗口已够高则只刷新布局，不触发缩小。
+
+        以 self.height()（实际窗口高度）而非 stage_size 做比较，确保打字机过程中
+        只增不减：避免新段初次溢出时目标尺寸小于上段残留的舞台而导致先缩后扩的闪现。
+        """
         new_size = _stage_size_for_layout(
             self.portrait_scale_percent,
             self.control_panel_width,
             bubble_height,
             self.input_bar_offset,
         )
-        if self.stage_size == new_size:
+        if new_size[1] <= self.height():
+            # 窗口已够高：只重布局气泡位置，保持 stage_size 不变，不触发缩小
+            self._layout_stage()
             return
         self.stage_size = new_size
         self.portrait_controller.set_stage_size(new_size)
         self._resize_stage_anchor_bottom(new_size)
+        # resizeEvent → _layout_stage 自动触发，无需手动调用
+
+    def _collapse_auto_fit_bubble_height(self) -> None:
+        """将自适应气泡高度收回到用户设置值，以底边为锚点收缩窗口。
+
+        在 cancel_reply_flow 之前调用：回复结束或被打断时统一收回上次拓展的高度，
+        避免下一轮回复开始时窗口仍处于拓展状态导致先缩后扩的闪现。
+        """
+        if self._auto_fit_bubble_height is None:
+            return
+        self._auto_fit_bubble_height = None
+        base_size = _stage_size_for_layout(
+            self.portrait_scale_percent,
+            self.control_panel_width,
+            self.bubble_height,
+            self.input_bar_offset,
+        )
+        if self.stage_size == base_size:
+            self._layout_stage()
+            return
+        self.stage_size = base_size
+        self.portrait_controller.set_stage_size(base_size)
+        self._resize_stage_anchor_bottom(base_size)
 
     def _layout_stage(self) -> None:
         width = self.width()
@@ -1610,6 +1639,7 @@ class PetWindow(QWidget):
             animator.play_send_feedback()
         self.input_edit.clear()
         self._log_interaction_stage("input_cleared")
+        self._collapse_auto_fit_bubble_height()
         self.subtitle_controller.cancel_reply_flow("......")
         self._log_interaction_stage("placeholder_reply_shown")
 
@@ -2328,6 +2358,7 @@ class PetWindow(QWidget):
         if self.messages and self.messages[-1]["role"] == "user":
             self.messages.pop()
         self._record_history("error", message)
+        self._collapse_auto_fit_bubble_height()
         self.subtitle_controller.cancel_reply_flow(
             "……通信に失敗した。設定を確認して。", transition=True
         )
@@ -2593,6 +2624,7 @@ class PetWindow(QWidget):
         self.startup_initializing = False
         self._emit_app_started_event()
         self.input_edit.setPlaceholderText(f"和{self.character_profile.display_name}说点什么...")
+        self._collapse_auto_fit_bubble_height()
         self.subtitle_controller.cancel_reply_flow(self.character_profile.initial_message)
         if self.memory_status_message_active:
             QTimer.singleShot(
@@ -2624,6 +2656,7 @@ class PetWindow(QWidget):
     def handle_deferred_startup_failed(self, error: str) -> None:
         self.startup_initializing = False
         self.input_edit.setPlaceholderText(f"和{self.character_profile.display_name}说点什么...")
+        self._collapse_auto_fit_bubble_height()
         self.subtitle_controller.cancel_reply_flow(f"初始化失败：{error}")
         self._set_busy(False)
         if hasattr(self, "tray_icon"):
@@ -3989,6 +4022,7 @@ class PetWindow(QWidget):
         self._load_reply_history_from_store()
         if profile.id != previous_character_id:
             self.messages = []
+            self._collapse_auto_fit_bubble_height()
             self.subtitle_controller.cancel_reply_flow(profile.initial_message)
 
     def _create_history_store(self, profile: CharacterProfile) -> ChatHistoryStore:

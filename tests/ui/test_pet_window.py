@@ -6619,6 +6619,7 @@ def _build_minimal_manual_screenshot_window(text: str):
         "pending_manual_screen_observation",
         None,
     )
+    window._collapse_auto_fit_bubble_height = lambda: None
     return window, requests, history
 
 
