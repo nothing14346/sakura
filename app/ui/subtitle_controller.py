@@ -46,6 +46,7 @@ class SubtitleController(QObject):
         typing_interval_ms: int = SPEECH_TYPING_INTERVAL_MS,
         segment_pause_ms: int = REPLY_SEGMENT_PAUSE_MS,
         bubble_opacity_effect: Any = None,
+        on_typing_overflow: Callable[[int], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.speech_label = speech_label
@@ -59,6 +60,9 @@ class SubtitleController(QObject):
         # 气泡淡入脉冲：用于每段台词浮现，None 时退化为无动画（测试/历史窗口单独构造安全）。
         self._bubble_opacity_effect = bubble_opacity_effect
         self._bubble_fade_anim: QSequentialAnimationGroup | None = None
+        # 打字机溢出回调：标签高度增大时通知调用方按需扩展气泡（None 时不触发）。
+        self._on_typing_overflow = on_typing_overflow
+        self._last_label_height: int = 0
 
         self.speech_text = ""
         self.speech_index = 0
@@ -162,6 +166,7 @@ class SubtitleController(QObject):
         self.speech_timer.stop()
         self.speech_text = cleaned
         self.speech_index = 0
+        self._last_label_height = 0
         self.speech_label.clear()
         if self.speech_text:
             self.speech_timer.start()
@@ -375,6 +380,15 @@ class SubtitleController(QObject):
 
         self.speech_index += 1
         self.speech_label.setText(self.speech_text[: self.speech_index])
+
+        if self._on_typing_overflow is not None:
+            w = self.speech_label.width()
+            if w > 0:
+                h = self.speech_label.heightForWidth(w)
+                if h > 0 and h > self._last_label_height:
+                    self._last_label_height = h
+                    self._on_typing_overflow(h)
+
         if self.speech_index >= len(self.speech_text):
             self.speech_timer.stop()
             if self.current_segment_sequence_id is not None:

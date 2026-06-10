@@ -115,6 +115,8 @@ from app.ui.control_panel_layout import (
     DEFAULT_CONTROL_PANEL_WIDTH,
     DEFAULT_INPUT_BAR_OFFSET,
     INPUT_BAR_HEIGHT,
+    MAX_BUBBLE_HEIGHT,
+    MIN_BUBBLE_HEIGHT,
     MIN_CONTROL_PANEL_WIDTH,
     normalize_bubble_height,
     normalize_control_panel_vertical_offset,
@@ -395,6 +397,8 @@ class PetWindow(QWidget):
         self.bubble_height = self._load_bubble_height()
         self.control_panel_vertical_offset = self._load_control_panel_vertical_offset()
         self.input_bar_offset = self._load_input_bar_offset()
+        # 自适应文本气泡高度（None = 使用用户设置的 bubble_height）
+        self._auto_fit_bubble_height: int | None = None
         (
             self.subtitle_typing_interval_ms,
             self.reply_segment_pause_ms,
@@ -572,6 +576,7 @@ class PetWindow(QWidget):
             typing_interval_ms=self.subtitle_typing_interval_ms,
             segment_pause_ms=self.reply_segment_pause_ms,
             bubble_opacity_effect=self.bubble_opacity_effect,
+            on_typing_overflow=self._fit_bubble_for_label_height,
         )
         self.speech_timer = self.subtitle_controller.speech_timer
         if not self.startup_initializing:
@@ -972,6 +977,8 @@ class PetWindow(QWidget):
         self._schedule_native_topmost_sync()
 
     def _apply_reply_segment(self, segment: ChatSegment) -> None:
+        # 新台词段开始：重置自适应高度，让气泡从用户设置高度重新随打字机扩展。
+        self._auto_fit_bubble_height = None
         self.portrait_controller.apply_for_segment(segment)
         self._sync_reply_history_index_for_segment(segment)
         # 新台词开始：保持气泡显示并暂停自动隐藏倒计时。
@@ -1155,6 +1162,37 @@ class PetWindow(QWidget):
             return
         self.speech_label.setFont(_rounded_japanese_font(15, QFont.Weight.Medium))
 
+    def _fit_bubble_for_label_height(self, label_h: int) -> None:
+        """打字机溢出回调：按标签实际高度逐行扩展气泡（不持久化、不超上限）。"""
+        name_h = self.name_label.sizeHint().height()
+        # 纵向开销：bubble_layout 上下 margin(12+14) + name_label + 内层 spacing(6) + 余量(4)
+        overhead = 12 + name_h + 6 + 14 + 4
+        needed = label_h + overhead
+        current = self._auto_fit_bubble_height if self._auto_fit_bubble_height is not None else self.bubble_height
+        if needed <= current:
+            return
+        line_h = self.speech_label.fontMetrics().lineSpacing()
+        new_h = min(current + line_h, MAX_BUBBLE_HEIGHT)
+        if new_h == current:
+            return
+        self._auto_fit_bubble_height = new_h
+        self._ensure_stage_for_bubble_height(new_h)
+        # resize() 触发 resizeEvent → _layout_stage()，无需再手动调用
+
+    def _ensure_stage_for_bubble_height(self, bubble_height: int) -> None:
+        """必要时调整舞台尺寸以容纳指定气泡高度。"""
+        new_size = _stage_size_for_layout(
+            self.portrait_scale_percent,
+            self.control_panel_width,
+            bubble_height,
+            self.input_bar_offset,
+        )
+        if self.stage_size == new_size:
+            return
+        self.stage_size = new_size
+        self.portrait_controller.set_stage_size(new_size)
+        self.resize(*new_size)
+
     def _layout_stage(self) -> None:
         width = self.width()
         height = self.height()
@@ -1169,7 +1207,12 @@ class PetWindow(QWidget):
         )
 
         bubble_width = min(self.control_panel_width, max(MIN_CONTROL_PANEL_WIDTH, width - 32))
-        bubble_height = self.bubble_height
+        # 优先使用自适应文本高度，回退到用户设置
+        bubble_height = (
+            self._auto_fit_bubble_height
+            if self._auto_fit_bubble_height is not None
+            else self.bubble_height
+        )
         bubble_x = (width - bubble_width) // 2
         # vertical_offset 正值向上抬升整组（减小 y），负值向下沉。
         bubble_y = (
@@ -3691,6 +3734,8 @@ class PetWindow(QWidget):
         self.bubble_height = next_bubble_height
         self.control_panel_vertical_offset = next_offset
         self.input_bar_offset = next_input_offset
+        # 用户在设置面板修改布局时清除自适应高度，使新 bubble_height 立即生效。
+        self._auto_fit_bubble_height = None
         self.stage_size = _stage_size_for_layout(
             self.portrait_scale_percent,
             self.control_panel_width,
