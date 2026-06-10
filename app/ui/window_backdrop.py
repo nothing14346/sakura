@@ -134,6 +134,7 @@ class MacOSVisualEffectBackdrop:
         self._effect_view: object | None = None
         self._container: object | None = None
         self._original_content_view: object | None = None
+        self._root_view: object | None = None  # Qt 的 NSView，remove 时需要重新挂回原始 contentView
         self._fallback = FallbackTintBackdrop()
 
     def apply(self, window: QWidget, tint: QColor) -> None:
@@ -170,6 +171,9 @@ class MacOSVisualEffectBackdrop:
             if content_view is None:
                 self._fallback.apply(window, tint)
                 return
+
+            # 保存 root_view 供 remove 时重新挂回
+            self._root_view = root_view
 
             # ── Content Swap ──
             # 创建一个新的透明容器，替换 NSWindow 的 contentView，
@@ -234,18 +238,24 @@ class MacOSVisualEffectBackdrop:
                 pass
             finally:
                 self._effect_view = None
-        # 恢复原始 contentView
+        # 恢复原始 contentView，并重新挂回 Qt 的 root_view
         if self._original_content_view is not None and self._container is not None:
             try:
-                # 从 container 中找到 NSWindow
                 ns_window = self._container.window()
                 if ns_window is not None:
+                    # 先把 Qt 的 root_view 从容器里移回原始 contentView，
+                    # 否则恢复 contentView 后 root_view 没有 window → 后续
+                    # apply 拿到的 root_view.window() 为 None → 静默降级。
+                    if self._root_view is not None:
+                        self._root_view.removeFromSuperview()  # 从容器移除
+                        self._original_content_view.addSubview_(self._root_view)
                     ns_window.setContentView_(self._original_content_view)
             except Exception:  # noqa: BLE001
                 pass
             finally:
                 self._container = None
                 self._original_content_view = None
+                self._root_view = None
 
     def supports_native_blur(self) -> bool:
         return True

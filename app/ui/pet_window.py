@@ -735,9 +735,12 @@ class PetWindow(QWidget):
             self.input_bar_animator.start()
         if hasattr(self, "bubble_auto_hide"):
             self.bubble_auto_hide.start()
-        # macOS 上 Qt.Tool 子窗口 show() 后不会自动浮在父窗口之上，需要延迟一帧 raise
+        # macOS 上 Qt.Tool 子窗口 show() 后不会自动浮在父窗口之上。
+        # singleShot(0) 延迟一帧 → 窗口刚创建完但 WindowServer 合成器可能尚未提交；
+        # singleShot(100ms) 补一发确保 bubble 确实在立绘前端渲染。
         if sys.platform == "darwin":
             QTimer.singleShot(0, self._raise_foreground_controls)
+            QTimer.singleShot(100, self._raise_foreground_controls)
         self._refresh_tray_menu()
         self._schedule_native_topmost_sync()
         if getattr(self, "memory_failure_dialog_pending_message", ""):
