@@ -74,3 +74,10 @@ class AcrylicCardWindow(QWidget):
         super().showEvent(event)
         # winId 在 show 之后才有效，此时施加亚克力最稳。圆角由 backdrop 内部的 DWM 原生圆角负责。
         self._backdrop.apply(self, self._tint)
+
+    def hideEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().hideEvent(event)
+        # macOS 上 hide() 销毁 native NSWindow，Content Swap 的 effect_view
+        # 也被释放（PyObjC 引用虽在但底层 NSView 已 dead）。remove 清理引用，
+        # 确保下次 showEvent 中 apply 能重建。
+        self._backdrop.remove(self)
