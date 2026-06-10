@@ -234,6 +234,11 @@ def build_pet_window_stylesheet(settings: ThemeSettings) -> str:
     background: transparent;
     border: none;
 }}
+#inputBar[visualEffectMode="solid"] {{
+    background: {rgba(theme.bubble_background_color, 238)};
+    border: 1px solid {rgba(theme.border_color, 170)};
+    border-radius: 22px;
+}}
 #petInput {{
     background: {rgba(theme.input_background_color, 55)};
     border: 1px solid rgba(255, 255, 255, 218);
@@ -244,8 +249,16 @@ def build_pet_window_stylesheet(settings: ThemeSettings) -> str:
     padding: 3px 16px;
     selection-background-color: {rgba(theme.primary_color, 92)};
 }}
+#petInput[visualEffectMode="solid"] {{
+    background: {rgba(theme.input_background_color, 235)};
+    border: 1px solid {rgba(theme.border_color, 148)};
+}}
 #petInput:focus {{
     background: {rgba(theme.input_background_color, 90)};
+    border: 1px solid {rgba(theme.primary_color, 210)};
+}}
+#petInput[visualEffectMode="solid"]:focus {{
+    background: {theme.input_background_color};
     border: 1px solid {rgba(theme.primary_color, 210)};
 }}
 #petInput:disabled {{

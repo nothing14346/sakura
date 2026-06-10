@@ -3796,6 +3796,24 @@ class PetWindow(QWidget):
 
     # ── 输入栏视觉效果（对称统一管线）────────────────────────────────
 
+    def _input_bar_visual_effect_mode(self) -> str:
+        return VisualEffectMode.validate(
+            getattr(self.theme_settings, "visual_effect_mode", VisualEffectMode.DEFAULT)
+        )
+
+    def _apply_input_bar_visual_effect_property(self, mode: str) -> None:
+        """同步动态样式属性，让纯色块等模式能触发对应 QSS。"""
+        for widget in (getattr(self, "input_bar", None), getattr(self, "input_edit", None)):
+            if widget is None:
+                continue
+            if widget.property("visualEffectMode") == mode:
+                continue
+            widget.setProperty("visualEffectMode", mode)
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
+            widget.update()
+
     def _backdrop_for_input_bar(self) -> tuple:
         """根据当前主题的 visual_effect_mode 返回 (backdrop, needs_bg_layer, before_show_callback)。
 
@@ -3805,9 +3823,7 @@ class PetWindow(QWidget):
         - WINDOWS_ACRYLIC:    WindowsAcrylicBackdrop + 无 bg 层 + 无回调
         - MACOS_VISUAL_EFFECT: MacOSVisualEffectBackdrop + 无 bg 层 + 无回调
         """
-        mode = VisualEffectMode.validate(
-            getattr(self.theme_settings, "visual_effect_mode", VisualEffectMode.DEFAULT)
-        )
+        mode = self._input_bar_visual_effect_mode()
         backdrop = create_window_backdrop(mode=mode)
 
         if mode == VisualEffectMode.GAUSSIAN_BLUR:
@@ -3821,6 +3837,8 @@ class PetWindow(QWidget):
 
     def _sync_input_bar_backdrop(self) -> None:
         """外观效果模式 / 主题改变时，重建整个输入栏外观管线。"""
+        mode = self._input_bar_visual_effect_mode()
+        self._apply_input_bar_visual_effect_property(mode)
         backdrop, needs_bg, before_show = self._backdrop_for_input_bar()
         window = getattr(self, "input_window", None)
         if window is None:
@@ -3829,18 +3847,17 @@ class PetWindow(QWidget):
         if type(window._backdrop) is type(backdrop):  # noqa: SLF001
             return
 
-        # 用户可见时才需要过渡动画。窗口始终不手动 apply —
-        # 由 show() → showEvent → backdrop.apply(window) 接管，
-        # 保证 winId 有效（hidden 时 winId==0 会 crash PyObjC/ctypes）。
+        # 先移除旧 backdrop，再隐藏窗口。Windows DWM 状态绑定在 HWND 上；
+        # 若先 hide，后续 remove 可能拿不到有效窗口句柄，导致亚克力/小圆角残留。
         visible = window.isVisible()
-        if visible:
-            window.hide()
-            QApplication.processEvents()
-
         try:
             window._backdrop.remove(window)  # noqa: SLF001
         except Exception:  # noqa: BLE001
             pass
+
+        if visible:
+            window.hide()
+            QApplication.processEvents()
 
         window._backdrop = backdrop  # noqa: SLF001
 
