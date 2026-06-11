@@ -3650,6 +3650,75 @@ def test_settings_dialog_shows_memory_dependency_download_hint() -> None:
     app.processEvents()
 
 
+def test_settings_dialog_imports_memory_model_archive(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QApplication"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui import settings_dialog as settings_dialog_module
+    from app.ui.settings_dialog import SettingsDialog
+
+    class ImportResult:
+        model_name = "sentence-transformers/all-MiniLM-L6-v2"
+        cache_folder = Path("runtime/hf-cache/hub")
+        snapshot_count = 1
+
+    class MemoryStoreStub:
+        def __init__(self) -> None:
+            self.list_calls = 0
+            self.imported_paths: list[Path] = []
+
+        def needs_embedding_model_download(self) -> bool:
+            return True
+
+        def list_memories(self, *, limit: int = 20):  # type: ignore[no-untyped-def]
+            self.list_calls += 1
+            return []
+
+        def import_embedding_model_archive(self, archive_path: Path) -> ImportResult:
+            self.imported_paths.append(archive_path)
+            return ImportResult()
+
+    QApplication = qtwidgets.QApplication
+    app = QApplication.instance() or QApplication([])
+    root = _ui_runtime_root("memory_model_import_dialog")
+    archive_path = root / "models--sentence-transformers--all-MiniLM-L6-v2.zip"
+    archive_path.write_bytes(b"zip")
+    memory_store = MemoryStoreStub()
+    monkeypatch.setattr(
+        settings_dialog_module.QFileDialog,
+        "getOpenFileName",
+        lambda *_args, **_kwargs: (str(archive_path), "记忆模型 ZIP (*.zip)"),
+    )
+    monkeypatch.setattr(settings_dialog_module.QMessageBox, "information", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(settings_dialog_module.QMessageBox, "warning", lambda *_args, **_kwargs: None)
+    dialog = SettingsDialog(
+        api_settings=ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="test-key",
+            model="test-model",
+        ),
+        tts_settings=_minimal_tts_settings(),
+        base_dir=root,
+        proactive_care_settings=ProactiveCareSettings(screen_context_enabled=True),
+        mcp_settings=MCPRuntimeSettings(windows_enabled=False),
+        memory_store=memory_store,  # type: ignore[arg-type]
+    )
+
+    assert hasattr(dialog, "memory_import_model_button")
+    assert _process_events_until(app, lambda: dialog._memory_list_thread is None)
+
+    dialog.memory_import_model_button.click()
+
+    assert _process_events_until(app, lambda: dialog._memory_model_import_thread is None)
+    assert memory_store.imported_paths == [archive_path]
+    assert _process_events_until(app, lambda: dialog._memory_list_thread is None)
+    assert memory_store.list_calls >= 2
+    dialog.deleteLater()
+    app.processEvents()
+
+
 def test_settings_dialog_filters_memory_locally() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")

@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.agent.memory import MemoryStore
+from app.agent.memory import EmbeddingModelImportResult, MemoryStore
 from app.agent.mcp import MCPRuntimeSettings, WINDOWS_MCP_EXPERIMENTAL_TEXT
 from app.core.debug_log import debug_log
 from app.config.character_archive import (
@@ -355,6 +355,28 @@ class MemoryListWorker(QObject):
             self.finished.emit()
 
 
+class MemoryModelImportWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, memory_store: MemoryStore, archive_path: Path) -> None:
+        super().__init__()
+        self.memory_store = memory_store
+        self.archive_path = archive_path
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = self.memory_store.import_embedding_model_archive(self.archive_path)
+        except Exception as exc:  # UI 边界统一转成可读错误。
+            self.failed.emit(str(exc))
+        else:
+            self.succeeded.emit(result)
+        finally:
+            self.finished.emit()
+
+
 class ThemeAiWorker(QObject):
     succeeded = Signal(object)
     failed = Signal(str)
@@ -545,6 +567,8 @@ class SettingsDialog(QDialog):
         self._save_button_text: str | None = None
         self._memory_list_thread: QThread | None = None
         self._memory_list_worker: MemoryListWorker | None = None
+        self._memory_model_import_thread: QThread | None = None
+        self._memory_model_import_worker: MemoryModelImportWorker | None = None
         self._theme_ai_thread: QThread | None = None
         self._theme_ai_worker: ThemeAiWorker | None = None
         self._theme_ai_enabled = self.theme_settings.ai_enabled
@@ -1565,6 +1589,11 @@ class SettingsDialog(QDialog):
 
         self.memory_refresh_button = QPushButton("刷新", tab)
         self.memory_refresh_button.clicked.connect(self._load_memory_entries)
+        self.memory_import_model_button = QPushButton("导入记忆模型", tab)
+        self.memory_import_model_button.setToolTip(
+            "导入 models--sentence-transformers--all-MiniLM-L6-v2.zip，供无法自动下载时使用。"
+        )
+        self.memory_import_model_button.clicked.connect(self._import_memory_model_archive)
         self.memory_status_label = QLabel(MEMORY_READING_TEXT, tab)
 
         self.memory_table = QTableWidget(0, 4, tab)
@@ -1615,6 +1644,7 @@ class SettingsDialog(QDialog):
 
         filter_layout = QHBoxLayout()
         filter_layout.addWidget(self.memory_search_edit, 1)
+        filter_layout.addWidget(self.memory_import_model_button)
         filter_layout.addWidget(self.memory_refresh_button)
 
         status_layout = QHBoxLayout()
@@ -1680,6 +1710,74 @@ class SettingsDialog(QDialog):
         self._memory_list_worker = worker
         thread.start()
 
+    def _import_memory_model_archive(self) -> None:
+        if self.memory_store is None:
+            return
+        if self._memory_model_import_thread is not None:
+            QMessageBox.information(self, "导入中", "记忆模型正在导入，请等待完成。")
+            return
+        path_text, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入记忆模型 ZIP",
+            str(self.base_dir),
+            "记忆模型 ZIP (*.zip)",
+        )
+        if not path_text:
+            return
+        self._start_memory_model_import(Path(path_text))
+
+    def _start_memory_model_import(self, archive_path: Path) -> None:
+        if self.memory_store is None:
+            return
+        self._set_memory_model_import_busy(True)
+        self.memory_status_label.setText("正在导入记忆模型...")
+
+        thread = QThread()
+        worker = MemoryModelImportWorker(self.memory_store, archive_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._handle_memory_model_import_success)
+        worker.failed.connect(self._handle_memory_model_import_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._reset_memory_model_import_worker)
+
+        self._memory_model_import_thread = thread
+        self._memory_model_import_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def _handle_memory_model_import_success(self, result: EmbeddingModelImportResult) -> None:
+        self.memory_status_label.setText("记忆模型已导入，正在重新读取长期记忆...")
+        QMessageBox.information(
+            self,
+            "导入成功",
+            (
+                f"记忆模型已导入：{result.model_name}\n"
+                f"缓存目录：{result.cache_folder}\n"
+                f"快照数量：{result.snapshot_count}"
+            ),
+        )
+        self._load_memory_entries()
+
+    @Slot(str)
+    def _handle_memory_model_import_failed(self, message: str) -> None:
+        self.memory_status_label.setText(f"导入失败：{message}")
+        QMessageBox.warning(self, "导入失败", message)
+
+    @Slot()
+    def _reset_memory_model_import_worker(self) -> None:
+        self._memory_model_import_thread = None
+        self._memory_model_import_worker = None
+        self._set_memory_model_import_busy(False)
+
+    def _set_memory_model_import_busy(self, busy: bool) -> None:
+        if hasattr(self, "memory_import_model_button"):
+            self.memory_import_model_button.setEnabled(not busy)
+        if hasattr(self, "memory_refresh_button"):
+            self.memory_refresh_button.setEnabled(not busy and self._memory_list_thread is None)
+
     def _memory_loading_text(self) -> str:
         if self.memory_store is None:
             return MEMORY_READING_TEXT
@@ -1714,7 +1812,7 @@ class SettingsDialog(QDialog):
 
     @Slot()
     def _reset_memory_list_worker(self) -> None:
-        self.memory_refresh_button.setEnabled(True)
+        self.memory_refresh_button.setEnabled(self._memory_model_import_thread is None)
         self._memory_list_thread = None
         self._memory_list_worker = None
         if self._memory_reload_pending:
