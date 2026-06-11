@@ -1529,6 +1529,57 @@ def test_settings_dialog_uses_grouped_top_level_tabs() -> None:
     app.processEvents()
 
 
+def test_settings_dialog_groupbox_title_indicator_has_vertical_room() -> None:
+    from app.ui.theme import DEFAULT_THEME_SETTINGS, build_settings_dialog_stylesheet
+
+    stylesheet = build_settings_dialog_stylesheet(DEFAULT_THEME_SETTINGS)
+
+    assert "QGroupBox#advancedParamsGroup {" in stylesheet
+    assert "QGroupBox#advancedParamsGroup::title" in stylesheet
+    assert "QGroupBox#advancedParamsGroup::indicator" in stylesheet
+    assert "margin-bottom: 2px;" in stylesheet
+
+
+def test_settings_dialog_insets_advanced_params_group() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QGroupBox")):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui.settings_dialog import SettingsDialog
+
+    QApplication = qtwidgets.QApplication
+    QGroupBox = qtwidgets.QGroupBox
+    app = QApplication.instance() or QApplication([])
+    root = _ui_runtime_root("advanced_params_group_insets")
+    dialog = SettingsDialog(
+        api_settings=ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="test-key",
+            model="test-model",
+        ),
+        tts_settings=_minimal_tts_settings(),
+        base_dir=root,
+        **_settings_dialog_character_kwargs(root),
+        proactive_care_settings=ProactiveCareSettings(screen_context_enabled=True),
+        mcp_settings=MCPRuntimeSettings(windows_enabled=False),
+    )
+
+    group = dialog.findChild(QGroupBox, "advancedParamsGroup")
+    assert group is not None
+    layout = group.parentWidget().layout()
+    margins = layout.contentsMargins()
+    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
+        16,
+        18,
+        16,
+        16,
+    )
+
+    dialog.deleteLater()
+    app.processEvents()
+
+
 def test_pet_window_syncs_plugin_chat_ui_widgets() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")

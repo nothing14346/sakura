@@ -990,7 +990,7 @@ class SettingsDialog(QDialog):
         api_actions_layout.addWidget(self.api_test_button)
 
         form_layout = QFormLayout()
-        form_layout.setContentsMargins(16, 18, 16, 16)
+        form_layout.setContentsMargins(0, 0, 0, 0)
         form_layout.setSpacing(12)
         form_layout.addRow("Base URL", self.base_url_edit)
         form_layout.addRow("API Key", self.api_key_edit)
@@ -1002,7 +1002,7 @@ class SettingsDialog(QDialog):
         form_container.setLayout(form_layout)
 
         outer_layout = QVBoxLayout()
-        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setContentsMargins(16, 18, 16, 16)
         outer_layout.setSpacing(12)
         outer_layout.addWidget(form_container)
         outer_layout.addWidget(self._build_advanced_llm_params_group(settings, tab))
@@ -1018,7 +1018,7 @@ class SettingsDialog(QDialog):
         构造为 None，请求不发送该参数，从而保持老用户行为不变。
         """
         group = QGroupBox("高级参数", parent)
-        group.setObjectName("settingsSectionContent")
+        group.setObjectName("advancedParamsGroup")
         group.setCheckable(True)
 
         # 警告说明：始终可见（折叠态也保留），既填充折叠后的空白，又提醒新手勿误改

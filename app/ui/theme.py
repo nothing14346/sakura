@@ -469,6 +469,13 @@ QGroupBox::title {{
     left: 12px;
     padding: 0 6px;
 }}
+QGroupBox#advancedParamsGroup {{
+    margin-top: 22px;
+    padding-top: 12px;
+}}
+QGroupBox#advancedParamsGroup::title {{
+    padding: 2px 6px 3px 6px;
+}}
 QLineEdit, QSpinBox, QDoubleSpinBox, QTextEdit, QTableWidget, QComboBox {{
     background: {rgba(theme.input_background_color, 235)};
     border: 1px solid {rgba(theme.border_color, 148)};
@@ -633,6 +640,10 @@ QCheckBox::indicator, QGroupBox::indicator {{
     border-radius: 4px;
     border: 1px solid {rgba(theme.primary_color, 173)};
     background: {theme.input_background_color};
+}}
+QGroupBox#advancedParamsGroup::indicator {{
+    margin-top: 2px;
+    margin-bottom: 2px;
 }}
 QCheckBox::indicator:checked, QGroupBox::indicator:checked {{
     background: {theme.primary_color};
