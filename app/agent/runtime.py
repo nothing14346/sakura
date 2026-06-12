@@ -100,6 +100,13 @@ class AgentRuntime:
         """允许模型在对话或主动事件中自主决定是否观察屏幕。"""
         self.autonomous_screen_observation_enabled = enabled
 
+    def _resolve_dialogue_params(self) -> tuple[float, dict[str, Any]]:
+        """读取角色对话生成参数，兼容测试桩和外部传入的旧客户端实现。"""
+        resolver = getattr(self.api_client, "resolve_dialogue_params", None)
+        if callable(resolver):
+            return resolver()
+        return 0.8, {}
+
     def _parse_final_reply_with_retry(
         self,
         system_prompt: str,
@@ -247,16 +254,18 @@ class AgentRuntime:
                         visible_browser_mode=visible_browser_guard_active,
                     )
                 )
+                dialogue_temperature, dialogue_extra_params = self._resolve_dialogue_params()
                 turn = self.api_client.complete_with_tools(
                     system_prompt,
                     working_messages,
                     tools=tool_defs,
                     tool_choice="auto",
-                    temperature=0.8,
+                    temperature=dialogue_temperature,
                     # Some OpenAI-compatible providers return pseudo tool-call JSON
                     # in message.content instead of native tool_calls when
                     # response_format=json_object is combined with tools.
                     structured_response=not bool(tool_defs),
+                    **dialogue_extra_params,
                 )
             except ApiRequestError as exc:
                 if messages_contain_image(working_messages) and is_vision_unsupported_error(exc):

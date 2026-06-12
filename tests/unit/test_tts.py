@@ -82,11 +82,13 @@ from app.voice.tts import (
     _format_gpt_sovits_http_error,
     _load_tone_references,
     _local_tts_subprocess_env,
+    _read_local_tts_output,
     _resolve_request_text_lang,
     _resolve_tts_cache_dir,
     _write_genie_audio,
     purge_tts_cache,
 )
+from app.core.gui_log import GUI_LOG_SCOPE_TTS, clear_gui_logs, get_gui_log_buffer
 from app.voice import VoicePlaybackController
 from app.voice.text_language_guard import should_skip_tts_text
 
@@ -817,14 +819,53 @@ def test_tts_weight_switch_error_includes_endpoint_and_path(monkeypatch) -> None
     assert "bad weights" in messages[0]
 
 
-def test_local_tts_subprocess_env_forces_utf8(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_local_tts_subprocess_env_uses_utf8_stdio_without_forcing_interpreter(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("PYTHONUTF8", "0")
     monkeypatch.setenv("PYTHONIOENCODING", "cp936")
 
     env = _local_tts_subprocess_env()
 
-    assert env["PYTHONUTF8"] == "1"
+    assert "PYTHONUTF8" not in env
     assert env["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_local_tts_output_reader_writes_file_and_gui_log() -> None:
+    clear_gui_logs()
+
+    class Stream:
+        def __init__(self) -> None:
+            self.closed = False
+            self._lines = iter(
+                [
+                    "########## 合成音频 ##########\n",
+                    'INFO: 127.0.0.1:49840 - "POST /tts HTTP/1.1" 200 OK\n',
+                ]
+            )
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __next__(self) -> str:
+            return next(self._lines)
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = Stream()
+    log_path = _runtime_root("local_tts_output_reader") / "service.log"
+
+    _read_local_tts_output(stream, log_path, "GPT-SoVITS")
+
+    assert stream.closed
+    assert "合成音频" in log_path.read_text(encoding="utf-8")
+    records = get_gui_log_buffer().snapshot(scope=GUI_LOG_SCOPE_TTS)
+    assert [record.message for record in records] == [
+        "开始合成音频",
+        "HTTP POST /tts -> 200 OK",
+    ]
+    clear_gui_logs()
 
 
 def test_gptsovits_charmap_http_error_gets_actionable_message() -> None:
@@ -835,6 +876,7 @@ def test_gptsovits_charmap_http_error_gets_actionable_message() -> None:
 
     assert "运行时编码不是 UTF-8" in message
     assert "由 Sakura 重新启动" in message
+    assert "UTF-8 标准输入输出" in message
     assert "原始响应" in message
 
 
@@ -897,7 +939,7 @@ def test_gptsovits_provider_warms_up_qt_player_before_first_play(monkeypatch) ->
 
     assert calls == ["timer", "audio", "player"]
 
-    provider._pending_audio.append((Path("dummy.wav"), None, None, None))
+    provider._pending_audio.append((Path("dummy.wav"), None, None, None, ""))
     provider._play_next()
 
     assert calls == ["timer", "audio", "player", "source", "play"]
@@ -958,6 +1000,7 @@ def test_tts_provider_treats_started_stopped_state_as_audio_finished(monkeypatch
             lambda: events.append("first_started"),
             lambda: events.append("first_finished"),
             None,
+            "",
         )
     )
     provider._pending_audio.append(
@@ -966,6 +1009,7 @@ def test_tts_provider_treats_started_stopped_state_as_audio_finished(monkeypatch
             lambda: events.append("second_started"),
             lambda: events.append("second_finished"),
             None,
+            "",
         )
     )
 
@@ -1045,6 +1089,7 @@ def test_tts_provider_finish_fallback_advances_queue_without_player_end_signal(m
             lambda: events.append("first_started"),
             lambda: events.append("first_finished"),
             None,
+            "",
         )
     )
     provider._pending_audio.append(
@@ -1053,6 +1098,7 @@ def test_tts_provider_finish_fallback_advances_queue_without_player_end_signal(m
             lambda: events.append("second_started"),
             lambda: events.append("second_finished"),
             None,
+            "",
         )
     )
 

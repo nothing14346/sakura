@@ -103,16 +103,27 @@ class AppSettingsService:
             api_key=str(data.get("api_key", "")).strip(),
             model=str(data.get("model", "gpt-4.1-mini")).strip(),
             timeout_seconds=timeout_seconds,
+            temperature=_optional_float(data.get("temperature"), minimum=0.0, maximum=2.0),
+            top_p=_optional_float(data.get("top_p"), minimum=0.0, maximum=1.0),
+            max_tokens=_optional_positive_int(data.get("max_tokens")),
         )
 
     def save_api_settings(self, settings: ApiSettings) -> None:
         data = load_yaml_mapping(self.api_config_path)
-        data["llm"] = {
+        llm_data: dict[str, Any] = {
             "base_url": settings.base_url.strip().rstrip("/"),
             "api_key": settings.api_key.strip(),
             "model": settings.model.strip(),
             "timeout_seconds": int(settings.timeout_seconds),
         }
+        # 仅写入用户显式配置的高级参数，避免给老配置塞入空键、改变默认行为。
+        if settings.temperature is not None:
+            llm_data["temperature"] = float(settings.temperature)
+        if settings.top_p is not None:
+            llm_data["top_p"] = float(settings.top_p)
+        if settings.max_tokens is not None:
+            llm_data["max_tokens"] = int(settings.max_tokens)
+        data["llm"] = llm_data
         save_yaml_mapping(self.api_config_path, data)
 
     def load_tts_settings(
@@ -447,6 +458,28 @@ def _int_value(value: Any, default: int) -> int:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _optional_float(value: Any, *, minimum: float, maximum: float) -> float | None:
+    """解析可选浮点参数；缺省或非法返回 None，合法值 clamp 到 [minimum, maximum]。"""
+    if value is None:
+        return None
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return max(minimum, min(maximum, parsed))
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    """解析可选正整数；缺省、非法或非正返回 None。"""
+    if value is None:
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _bool_value(value: Any, default: bool) -> bool:
