@@ -81,6 +81,7 @@ def test_pet_window_menu_keeps_only_allowed_checkable_switches() -> None:
     host._toggle_free_access = lambda _checked: None
     host._toggle_always_on_top = lambda _checked: None
     host.show_history = lambda: None
+    host.show_runtime_log = lambda: None
     host.show_settings = lambda: None
     host.show()
     app.processEvents()
@@ -94,6 +95,7 @@ def test_pet_window_menu_keeps_only_allowed_checkable_switches() -> None:
     assert "启用模型视觉" not in texts
     assert "允许自主看屏幕" not in texts
     assert "自由访问权限" not in texts
+    assert "运行日志" in texts
     assert "显示中文字幕" in checkable_texts
     assert "完整访问权限" in checkable_texts
     assert "保持置顶" in checkable_texts
@@ -131,6 +133,7 @@ def test_pet_window_menu_shows_restore_action_when_hidden() -> None:
     host._toggle_free_access = lambda _checked: None
     host._toggle_always_on_top = lambda _checked: None
     host.show_history = lambda: None
+    host.show_runtime_log = lambda: None
     host.show_settings = lambda: None
 
     menu = PetWindow._build_menu(host)  # type: ignore[arg-type]
@@ -140,6 +143,256 @@ def test_pet_window_menu_shows_restore_action_when_hidden() -> None:
 
     menu.deleteLater()
     host.deleteLater()
+    app.processEvents()
+
+
+def test_show_runtime_log_uses_non_modal_show(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QWidget"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    import app.ui.pet_window as pet_window_module
+
+    events: list[str] = []
+
+    class RuntimeLogWindowStub:
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.kwargs = kwargs
+            self.visible = False
+
+        def set_theme_settings(self, settings):  # type: ignore[no-untyped-def]
+            events.append("theme")
+            self.theme_settings = settings
+
+        def refresh(self, *, reset: bool = False) -> None:
+            events.append(f"refresh:{reset}")
+
+        def show(self) -> None:
+            events.append("show")
+            self.visible = True
+
+        def raise_(self) -> None:
+            events.append("raise")
+
+        def activateWindow(self) -> None:
+            events.append("activate")
+
+        def exec(self):  # type: ignore[no-untyped-def]
+            raise AssertionError("运行日志窗口不应使用 exec() 打开")
+
+    class Host(qtwidgets.QWidget):
+        show_runtime_log = pet_window_module.PetWindow.show_runtime_log
+        _any_dialog_open = pet_window_module.PetWindow._any_dialog_open
+
+    monkeypatch.setattr(pet_window_module, "RuntimeLogWindow", RuntimeLogWindowStub)
+
+    app = qtwidgets.QApplication.instance() or qtwidgets.QApplication([])
+    host = Host()
+    host.theme_settings = DEFAULT_THEME_SETTINGS
+    host.runtime_log_window = None
+    host.settings_dialog = None
+    host.history_window = None
+
+    host.show_runtime_log()
+
+    assert events == ["theme", "refresh:True", "show", "raise", "activate"]
+    assert host.runtime_log_window.kwargs["parent"] is host
+    assert host._any_dialog_open() is False
+
+    host.deleteLater()
+    app.processEvents()
+
+
+def test_runtime_log_window_is_non_modal() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    qtcore = pytest.importorskip("PySide6.QtCore")
+    if not hasattr(qtwidgets, "QApplication"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui.log_window import RuntimeLogWindow
+
+    app = qtwidgets.QApplication.instance() or qtwidgets.QApplication([])
+    window = RuntimeLogWindow(theme_settings=DEFAULT_THEME_SETTINGS)
+
+    assert window.windowModality() == qtcore.Qt.WindowModality.NonModal
+    assert window.tabs.count() == 2
+    assert window.tabs.tabText(0) == "软件"
+    assert window.tabs.tabText(1) == "TTS"
+    assert "runtimeLogPage" in window.styleSheet()
+    assert "QCheckBox::indicator:checked" in window.styleSheet()
+    assert DEFAULT_THEME_SETTINGS.page_background_color in window.styleSheet()
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_runtime_log_window_collapses_consecutive_duplicate_rows() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    qtcore = pytest.importorskip("PySide6.QtCore")
+    if not hasattr(qtwidgets, "QApplication"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.core.gui_log import GUI_LOG_LEVEL_INFO, GUI_LOG_SCOPE_PROGRAM, GuiLogBuffer
+    from app.ui.log_window import RuntimeLogWindow
+
+    buffer = GuiLogBuffer()
+    for _index in range(2):
+        buffer.append(
+            timestamp="2026-06-11T18:43:44+08:00",
+            scope=GUI_LOG_SCOPE_PROGRAM,
+            level=GUI_LOG_LEVEL_INFO,
+            category="TTS",
+            message="准备：GPT-SoVITS 服务已就绪",
+        )
+    buffer.append(
+        timestamp="2026-06-11T18:43:45+08:00",
+        scope=GUI_LOG_SCOPE_PROGRAM,
+        level=GUI_LOG_LEVEL_INFO,
+        category="TTS",
+        message="准备：TTS 角色权重切换完成",
+    )
+
+    app = qtwidgets.QApplication.instance() or qtwidgets.QApplication([])
+    window = RuntimeLogWindow(log_buffer=buffer, theme_settings=DEFAULT_THEME_SETTINGS)
+
+    assert window.program_list.count() == 2
+    first_item = window.program_list.item(0)
+    assert first_item.text() == "18:43:44  [TTS]  准备：GPT-SoVITS 服务已就绪  ×2"
+    assert "信息" not in first_item.text()
+    assert "连续重复：2 次" in str(first_item.data(qtcore.Qt.ItemDataRole.UserRole))
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_runtime_log_window_row_shows_category_level_and_detail_summary() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QApplication"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.core.gui_log import (
+        GUI_LOG_LEVEL_ERROR,
+        GUI_LOG_LEVEL_INFO,
+        GUI_LOG_SCOPE_PROGRAM,
+        GuiLogBuffer,
+    )
+    from app.ui.log_window import RuntimeLogWindow
+
+    buffer = GuiLogBuffer()
+    buffer.append(
+        timestamp="2026-06-11T18:51:27+08:00",
+        scope=GUI_LOG_SCOPE_PROGRAM,
+        level=GUI_LOG_LEVEL_INFO,
+        category="API",
+        message="发送请求",
+        detail='{"model": "gpt-4o-mini", "stream": true, "messages": {"type": "list", "items": 4}}',
+    )
+    buffer.append(
+        timestamp="2026-06-11T18:51:31+08:00",
+        scope=GUI_LOG_SCOPE_PROGRAM,
+        level=GUI_LOG_LEVEL_ERROR,
+        category="API",
+        message="请求失败",
+        detail='{"error": "connection timeout", "api_key": "<redacted>"}',
+    )
+
+    app = qtwidgets.QApplication.instance() or qtwidgets.QApplication([])
+    window = RuntimeLogWindow(log_buffer=buffer, theme_settings=DEFAULT_THEME_SETTINGS)
+
+    info_item = window.program_list.item(0)
+    # 行内带分类标签，detail 中的标量字段提取为行尾摘要，嵌套结构与脱敏值不出现
+    assert info_item.text() == "18:51:27  [API]  发送请求  model=gpt-4o-mini · stream=True"
+    error_item = window.program_list.item(1)
+    assert error_item.text() == "18:51:31  [API]  错误  请求失败  error=connection timeout"
+    assert "<redacted>" not in error_item.text()
+
+    # 两个列表都应使用自定义 delegate 做分层着色
+    assert window.program_list.itemDelegate() is window._item_delegate
+    assert window.tts_list.itemDelegate() is window._item_delegate
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_runtime_log_window_shows_tts_text_preview_as_detail() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QApplication"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.core.gui_log import GUI_LOG_LEVEL_INFO, GUI_LOG_SCOPE_PROGRAM, GuiLogBuffer
+    from app.ui.log_window import RuntimeLogWindow
+
+    buffer = GuiLogBuffer()
+    buffer.append(
+        timestamp="2026-06-11T18:51:35+08:00",
+        scope=GUI_LOG_SCOPE_PROGRAM,
+        level=GUI_LOG_LEVEL_INFO,
+        category="TTS",
+        message="开始播放",
+        detail='{"audio_path": "x.wav"}',
+        text_preview="今天天气真好喵",
+    )
+
+    app = qtwidgets.QApplication.instance() or qtwidgets.QApplication([])
+    window = RuntimeLogWindow(log_buffer=buffer, theme_settings=DEFAULT_THEME_SETTINGS)
+
+    item = window.program_list.item(0)
+    # 合成/播放记录的灰字摘要优先显示文本内容而不是 detail 字段
+    assert item.text() == "18:51:35  [TTS]  开始播放  「今天天气真好喵」"
+    assert "文本：今天天气真好喵" in item.toolTip()
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_runtime_log_window_updates_progress_rows_in_place() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QApplication"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.core.gui_log import GUI_LOG_LEVEL_INFO, GUI_LOG_SCOPE_TTS, GuiLogBuffer
+    from app.ui.log_window import RuntimeLogWindow
+
+    buffer = GuiLogBuffer()
+    buffer.append(
+        timestamp="2026-06-11T18:51:31+08:00",
+        scope=GUI_LOG_SCOPE_TTS,
+        level=GUI_LOG_LEVEL_INFO,
+        category="GPT-SoVITS 服务",
+        message="语义 token 预测 4%（60/1500，104.91 it/s）",
+        merge_key="semantic-token-progress",
+    )
+
+    app = qtwidgets.QApplication.instance() or qtwidgets.QApplication([])
+    window = RuntimeLogWindow(log_buffer=buffer, theme_settings=DEFAULT_THEME_SETTINGS)
+    assert window.tts_list.count() == 1
+
+    # 已展示的进度行在新进度到达后应原地刷新，而不是追加新行
+    buffer.append(
+        timestamp="2026-06-11T18:51:34+08:00",
+        scope=GUI_LOG_SCOPE_TTS,
+        level=GUI_LOG_LEVEL_INFO,
+        category="GPT-SoVITS 服务",
+        message="语义 token 预测 24%（363/1500，105.23 it/s）",
+        merge_key="semantic-token-progress",
+    )
+    window.refresh()
+
+    assert window.tts_list.count() == 1
+    assert "24%" in window.tts_list.item(0).text()
+
+    window.close()
+    window.deleteLater()
     app.processEvents()
 
 
@@ -750,7 +1003,9 @@ def test_pet_window_screen_change_restores_stage_geometry(monkeypatch) -> None: 
             self.layout_count = 0
             self.topmost_sync_count = 0
 
-        def _layout_stage(self) -> None:
+        def _apply_pet_layout(self, *, anchor_global=None) -> None:  # type: ignore[no-untyped-def]
+            # 换屏恢复走统一布局；最小窗口无立绘，这里直接按 stage_size 复位并计数。
+            self.resize(*self.stage_size)
             self.layout_count += 1
 
         def _schedule_native_topmost_sync(self) -> None:
@@ -927,6 +1182,91 @@ def test_portrait_controller_scales_pixmap_by_configured_percent() -> None:
     app.processEvents()
 
 
+def test_portrait_controller_never_resizes_parent_window() -> None:
+    """方案2 契约：PortraitController 只贴立绘 + relayout，绝不 resize 主窗口。
+
+    主窗口几何统一由 PetWindow 以底边为锚点管理；若控制器再做左上锚点 resize，
+    会与底边锚点几何相互打架，产生切表情/缩放时的偶发跳闪。此处把宿主尺寸设成与
+    stage_size 不同的哨兵值，验证 apply_current 后宿主尺寸保持不变，且 relayout 仍被调用。
+    """
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    qtgui = pytest.importorskip("PySide6.QtGui")
+    qtcore = pytest.importorskip("PySide6.QtCore")
+    if not all(
+        hasattr(qtwidgets, name)
+        for name in ("QApplication", "QGraphicsOpacityEffect", "QLabel", "QWidget")
+    ):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.config.character_loader import CharacterProfile
+    from app.ui.portrait_controller import PortraitController
+
+    QApplication = qtwidgets.QApplication
+    QGraphicsOpacityEffect = qtwidgets.QGraphicsOpacityEffect
+    QLabel = qtwidgets.QLabel
+    QWidget = qtwidgets.QWidget
+    QPixmap = qtgui.QPixmap
+    Qt = qtcore.Qt
+    app = QApplication.instance() or QApplication([])
+
+    tmp_path = (
+        Path(__file__).resolve().parents[2]
+        / "temp"
+        / "test_runtime"
+        / "portrait_no_resize"
+        / uuid.uuid4().hex
+    )
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    portrait_path = tmp_path / "portrait.png"
+    source = QPixmap(1000, 1000)
+    source.fill(Qt.GlobalColor.white)
+    assert source.save(str(portrait_path))
+
+    profile = CharacterProfile(
+        id="demo",
+        display_name="Demo",
+        package_dir=tmp_path,
+        card_path=tmp_path / "card.md",
+        initial_message="hello",
+        default_portrait_path=portrait_path,
+    )
+    host = QWidget()
+    main_label = QLabel(host)
+    transition_label = QLabel(host)
+    relayout_calls = {"count": 0}
+
+    def _relayout() -> None:
+        relayout_calls["count"] += 1
+
+    controller = PortraitController(
+        profile=profile,
+        parent_widget=host,
+        main_label=main_label,
+        transition_label=transition_label,
+        main_opacity_effect=QGraphicsOpacityEffect(main_label),
+        transition_opacity_effect=QGraphicsOpacityEffect(transition_label),
+        # stage_size 故意区别于下面的哨兵尺寸，若控制器误 resize 会被立即发现。
+        stage_size=(860, 640),
+        relayout=_relayout,
+        raise_foreground=lambda: None,
+        on_portrait_changed=lambda _pixmap: None,
+    )
+
+    sentinel_size = qtcore.QSize(321, 234)
+    host.resize(sentinel_size)
+    assert host.size() == sentinel_size
+
+    controller.apply_current()
+
+    # 关键断言：宿主尺寸未被改成 stage_size，仍是哨兵尺寸；relayout 仍被调用。
+    assert host.size() == sentinel_size
+    assert relayout_calls["count"] >= 1
+
+    host.deleteLater()
+    app.processEvents()
+
+
 def test_pet_window_loads_normalized_portrait_scale_percent() -> None:
     from app.ui.pet_window import PetWindow
 
@@ -944,32 +1284,6 @@ def test_pet_window_loads_normalized_portrait_scale_percent() -> None:
     assert MinimalWindow({"portrait_scale_percent": "invalid"})._load_portrait_scale_percent() == 100
     assert MinimalWindow({"portrait_scale_percent": 20})._load_portrait_scale_percent() == 50
     assert MinimalWindow({"portrait_scale_percent": 180})._load_portrait_scale_percent() == 150
-
-
-def test_stage_size_shrinks_with_portrait_scale_below_default_height() -> None:
-    from app.ui.pet_window import _stage_size_for_portrait_scale_percent, MIN_STAGE_HEIGHT
-
-    # scale=100 → 默认 640px，不受影响
-    width, height = _stage_size_for_portrait_scale_percent(100)
-    assert width == 860
-    assert height == 640
-
-    # scale=65 → 640*0.65 = 416，触及下限 420
-    _, height = _stage_size_for_portrait_scale_percent(65)
-    assert height == MIN_STAGE_HEIGHT
-
-    # scale=50 → 640*0.5 = 320，下限保护
-    _, height = _stage_size_for_portrait_scale_percent(50)
-    assert height == MIN_STAGE_HEIGHT
-
-    # scale=150 → 640*1.5 = 960，正常放大
-    _, height = _stage_size_for_portrait_scale_percent(150)
-    assert height == 960
-
-    # 宽度始终固定 860，不随缩放变化
-    for percent in (50, 65, 100, 150):
-        width, _ = _stage_size_for_portrait_scale_percent(percent)
-        assert width == 860
 
 
 def test_control_panel_layout_normalization() -> None:
@@ -1008,37 +1322,6 @@ def test_control_panel_layout_normalization() -> None:
     assert normalize_control_panel_vertical_offset(40) == 40
     assert normalize_control_panel_vertical_offset(-40) == -40
     assert normalize_control_panel_vertical_offset(0) == 0
-
-
-def test_stage_size_for_layout_respects_panel_and_bubble() -> None:
-    from app.ui.pet_window import DEFAULT_STAGE_WIDTH, _stage_size_for_layout
-    from app.ui.control_panel_layout import (
-        DEFAULT_BUBBLE_HEIGHT,
-        DEFAULT_CONTROL_PANEL_WIDTH,
-        MAX_CONTROL_PANEL_WIDTH,
-        MIN_CONTROL_PANEL_WIDTH,
-    )
-
-    # 默认参数：宽度保底为默认舞台宽度 860，高度 640
-    width, height = _stage_size_for_layout(
-        100, DEFAULT_CONTROL_PANEL_WIDTH, DEFAULT_BUBBLE_HEIGHT
-    )
-    assert width == DEFAULT_STAGE_WIDTH
-    assert height == 640
-
-    # 控制组加宽到上限：舞台宽度扩展为 panel + 96
-    wide_width, _ = _stage_size_for_layout(100, MAX_CONTROL_PANEL_WIDTH, DEFAULT_BUBBLE_HEIGHT)
-    assert wide_width == MAX_CONTROL_PANEL_WIDTH + 96
-
-    # 控制组窄于默认时仍保底 860
-    narrow_width, _ = _stage_size_for_layout(100, MIN_CONTROL_PANEL_WIDTH, DEFAULT_BUBBLE_HEIGHT)
-    assert narrow_width == DEFAULT_STAGE_WIDTH
-
-    # 气泡变高：舞台高度随气泡增量同步增高
-    _, taller = _stage_size_for_layout(
-        100, DEFAULT_CONTROL_PANEL_WIDTH, DEFAULT_BUBBLE_HEIGHT + 60
-    )
-    assert taller == 640 + 60
 
 
 def test_pet_window_defaults_subtitle_language_to_chinese() -> None:
@@ -1156,12 +1439,14 @@ def test_pet_window_locks_controls_during_startup_initialization(monkeypatch) ->
     if not hasattr(qtwidgets, "QApplication"):
         pytest.skip("当前测试环境只提供了 PySide6 stub。")
 
+    from app.agent.memory import MemoryStore
     from app.core.bootstrap import build_initial_app_context
     from app.ui.pet_window import PetWindow, STARTUP_INITIALIZING_TEXT
 
     QApplication = qtwidgets.QApplication
     app = QApplication.instance() or QApplication([])
     root = _build_runtime_root_with_character(qtgui.QPixmap, qtcore.Qt)
+    monkeypatch.setattr(MemoryStore, "preload", lambda *a, **kw: None)
     context = build_initial_app_context(root)
     monkeypatch.setattr(PetWindow, "_maybe_start_memory_backfill", lambda _self: None)
     window = PetWindow(context)
@@ -1196,6 +1481,7 @@ def test_pet_window_unlocks_after_deferred_services_are_applied(monkeypatch) -> 
     if not hasattr(qtwidgets, "QApplication"):
         pytest.skip("当前测试环境只提供了 PySide6 stub。")
 
+    from app.agent.memory import MemoryStore
     from app.core.bootstrap import DeferredStartupServices, build_initial_app_context
     from app.core.extensions import ExtensionRegistry
     from app.core.plugin_manager import SakuraPluginManager
@@ -1212,6 +1498,7 @@ def test_pet_window_unlocks_after_deferred_services_are_applied(monkeypatch) -> 
     QApplication = qtwidgets.QApplication
     app = QApplication.instance() or QApplication([])
     root = _build_runtime_root_with_character(qtgui.QPixmap, qtcore.Qt)
+    monkeypatch.setattr(MemoryStore, "preload", lambda *a, **kw: None)
     context = build_initial_app_context(root)
     monkeypatch.setattr(PetWindow, "_maybe_start_memory_backfill", lambda _self: None)
     window = PetWindow(context)
@@ -1800,7 +2087,7 @@ def test_settings_dialog_backchannel_tts_follows_global_tts_toggle() -> None:
 def test_settings_dialog_adds_plugin_settings_panel() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")
-    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QLabel", "QTabWidget")):
+    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QLabel", "QListWidget")):
         pytest.skip("当前测试环境只提供了 PySide6 stub。")
 
     from app.ui.settings_dialog import SettingsDialog
@@ -1808,7 +2095,7 @@ def test_settings_dialog_adds_plugin_settings_panel() -> None:
 
     QApplication = qtwidgets.QApplication
     QLabel = qtwidgets.QLabel
-    QTabWidget = qtwidgets.QTabWidget
+    QListWidget = qtwidgets.QListWidget
     app = QApplication.instance() or QApplication([])
     dialog = SettingsDialog(
         api_settings=ApiSettings(
@@ -1827,9 +2114,13 @@ def test_settings_dialog_adds_plugin_settings_panel() -> None:
         ],
     )
 
-    tabs = dialog.findChild(QTabWidget)
-    assert tabs is not None
-    assert "插件" in [tabs.tabText(index) for index in range(tabs.count())]
+    nav = dialog.findChild(QListWidget, "settingsNavList")
+    assert nav is not None
+    assert "插件" in [nav.item(index).text() for index in range(nav.count())]
+    assert any(
+        isinstance(label, QLabel) and label.text() == "插件设置"
+        for label in dialog.findChildren(QLabel)
+    )
 
     dialog.deleteLater()
     app.processEvents()
@@ -1839,7 +2130,7 @@ def test_settings_dialog_manages_plugin_enabled_state() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qtcore = pytest.importorskip("PySide6.QtCore")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")
-    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QTabWidget", "QTableWidget", "QCheckBox")):
+    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QTableWidget", "QCheckBox")):
         pytest.skip("当前测试环境只提供了 PySide6 stub。")
 
     from app.plugins.discovery import PluginDiscovery
@@ -1902,14 +2193,18 @@ priority: 10
 def test_settings_dialog_uses_grouped_top_level_tabs() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")
-    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QComboBox", "QTabWidget")):
+    if not all(
+        hasattr(qtwidgets, name)
+        for name in ("QApplication", "QComboBox", "QListWidget", "QStackedWidget")
+    ):
         pytest.skip("当前测试环境只提供了 PySide6 stub。")
 
     from app.ui.settings_dialog import SettingsDialog
 
     QApplication = qtwidgets.QApplication
     QComboBox = qtwidgets.QComboBox
-    QTabWidget = qtwidgets.QTabWidget
+    QListWidget = qtwidgets.QListWidget
+    QStackedWidget = qtwidgets.QStackedWidget
     app = QApplication.instance() or QApplication([])
     app_stylesheet_before = app.styleSheet()
     root = _ui_runtime_root("grouped_settings_tabs")
@@ -1926,15 +2221,21 @@ def test_settings_dialog_uses_grouped_top_level_tabs() -> None:
         mcp_settings=MCPRuntimeSettings(windows_enabled=False),
     )
 
-    tabs = dialog.findChild(QTabWidget)
-    assert tabs is not None
-    assert [tabs.tabText(index) for index in range(tabs.count())] == [
-        "角色与外观",
-        "模型与语音",
-        "权限与工具",
+    nav = dialog.findChild(QListWidget, "settingsNavList")
+    stack = dialog.findChild(QStackedWidget, "settingsNavStack")
+    assert nav is not None
+    assert stack is not None
+    assert [nav.item(index).text() for index in range(nav.count())] == [
+        "角色",
+        "外观",
+        "模型",
+        "语音",
+        "隐私",
+        "工具",
         "插件",
         "系统",
     ]
+    assert stack.count() == nav.count()
     assert dialog.minimumWidth() >= 680
     assert dialog.minimumHeight() >= 500
     assert dialog.width() >= 820
@@ -1969,6 +2270,57 @@ def test_settings_dialog_uses_grouped_top_level_tabs() -> None:
     app.processEvents()
     assert dialog.character_combo.view().window().geometry().top() >= combo_bottom
     dialog.character_combo.hidePopup()
+
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_settings_dialog_groupbox_title_indicator_has_vertical_room() -> None:
+    from app.ui.theme import DEFAULT_THEME_SETTINGS, build_settings_dialog_stylesheet
+
+    stylesheet = build_settings_dialog_stylesheet(DEFAULT_THEME_SETTINGS)
+
+    assert "QGroupBox#advancedParamsGroup {" in stylesheet
+    assert "QGroupBox#advancedParamsGroup::title" in stylesheet
+    assert "QGroupBox#advancedParamsGroup::indicator" in stylesheet
+    assert "margin-bottom: 2px;" in stylesheet
+
+
+def test_settings_dialog_insets_advanced_params_group() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QGroupBox")):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui.settings_dialog import SettingsDialog
+
+    QApplication = qtwidgets.QApplication
+    QGroupBox = qtwidgets.QGroupBox
+    app = QApplication.instance() or QApplication([])
+    root = _ui_runtime_root("advanced_params_group_insets")
+    dialog = SettingsDialog(
+        api_settings=ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="test-key",
+            model="test-model",
+        ),
+        tts_settings=_minimal_tts_settings(),
+        base_dir=root,
+        **_settings_dialog_character_kwargs(root),
+        proactive_care_settings=ProactiveCareSettings(screen_context_enabled=True),
+        mcp_settings=MCPRuntimeSettings(windows_enabled=False),
+    )
+
+    group = dialog.findChild(QGroupBox, "advancedParamsGroup")
+    assert group is not None
+    layout = group.parentWidget().layout()
+    margins = layout.contentsMargins()
+    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
+        16,
+        18,
+        16,
+        16,
+    )
 
     dialog.deleteLater()
     app.processEvents()
@@ -2672,6 +3024,7 @@ def test_settings_dialog_skips_api_test_when_api_unchanged(monkeypatch) -> None:
 
     assert dialog.result_api_settings is not None
     assert dialog.result_api_settings.model == "test-model"
+    assert dialog.result_api_settings.temperature is None
     dialog.deleteLater()
     app.processEvents()
 
@@ -3742,6 +4095,75 @@ def test_settings_dialog_shows_memory_dependency_download_hint() -> None:
     assert _process_events_until(app, lambda: memory_store.list_calls == 1)
     assert _process_events_until(app, lambda: dialog._memory_list_thread is None)
     assert dialog.memory_status_label.text() == "已加载 0 条记忆"
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_settings_dialog_imports_memory_model_archive(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QApplication"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui import settings_dialog as settings_dialog_module
+    from app.ui.settings_dialog import SettingsDialog
+
+    class ImportResult:
+        model_name = "sentence-transformers/all-MiniLM-L6-v2"
+        cache_folder = Path("runtime/hf-cache/hub")
+        snapshot_count = 1
+
+    class MemoryStoreStub:
+        def __init__(self) -> None:
+            self.list_calls = 0
+            self.imported_paths: list[Path] = []
+
+        def needs_embedding_model_download(self) -> bool:
+            return True
+
+        def list_memories(self, *, limit: int = 20):  # type: ignore[no-untyped-def]
+            self.list_calls += 1
+            return []
+
+        def import_embedding_model_archive(self, archive_path: Path) -> ImportResult:
+            self.imported_paths.append(archive_path)
+            return ImportResult()
+
+    QApplication = qtwidgets.QApplication
+    app = QApplication.instance() or QApplication([])
+    root = _ui_runtime_root("memory_model_import_dialog")
+    archive_path = root / "models--sentence-transformers--all-MiniLM-L6-v2.zip"
+    archive_path.write_bytes(b"zip")
+    memory_store = MemoryStoreStub()
+    monkeypatch.setattr(
+        settings_dialog_module.QFileDialog,
+        "getOpenFileName",
+        lambda *_args, **_kwargs: (str(archive_path), "记忆模型 ZIP (*.zip)"),
+    )
+    monkeypatch.setattr(settings_dialog_module.QMessageBox, "information", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(settings_dialog_module.QMessageBox, "warning", lambda *_args, **_kwargs: None)
+    dialog = SettingsDialog(
+        api_settings=ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="test-key",
+            model="test-model",
+        ),
+        tts_settings=_minimal_tts_settings(),
+        base_dir=root,
+        proactive_care_settings=ProactiveCareSettings(screen_context_enabled=True),
+        mcp_settings=MCPRuntimeSettings(windows_enabled=False),
+        memory_store=memory_store,  # type: ignore[arg-type]
+    )
+
+    assert hasattr(dialog, "memory_import_model_button")
+    assert _process_events_until(app, lambda: dialog._memory_list_thread is None)
+
+    dialog.memory_import_model_button.click()
+
+    assert _process_events_until(app, lambda: dialog._memory_model_import_thread is None)
+    assert memory_store.imported_paths == [archive_path]
+    assert _process_events_until(app, lambda: dialog._memory_list_thread is None)
+    assert memory_store.list_calls >= 2
     dialog.deleteLater()
     app.processEvents()
 
@@ -5526,6 +5948,52 @@ def test_settings_dialog_returns_theme_settings() -> None:
     app.processEvents()
 
 
+def test_settings_dialog_downgrades_saved_windows_acrylic_to_gaussian(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QApplication"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui import window_backdrop as window_backdrop_module
+    from app.ui.settings_dialog import SettingsDialog
+    from app.ui.window_backdrop import VisualEffectMode
+
+    monkeypatch.setattr(window_backdrop_module.sys, "platform", "win32")
+    monkeypatch.setattr(window_backdrop_module, "_windows_build", lambda: 22631)
+
+    QApplication = qtwidgets.QApplication
+    app = QApplication.instance() or QApplication([])
+    root = _ui_runtime_root("theme_settings_windows_acrylic_downgrade")
+    dialog = SettingsDialog(
+        api_settings=ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="test-key",
+            model="test-model",
+        ),
+        tts_settings=_minimal_tts_settings(),
+        base_dir=root,
+        **_settings_dialog_character_kwargs(root),
+        proactive_care_settings=ProactiveCareSettings(screen_context_enabled=True),
+        mcp_settings=MCPRuntimeSettings(windows_enabled=False),
+        theme_settings=ThemeSettings(visual_effect_mode=VisualEffectMode.WINDOWS_ACRYLIC),
+    )
+
+    labels = [
+        dialog.theme_visual_effect_combo.itemText(index)
+        for index in range(dialog.theme_visual_effect_combo.count())
+    ]
+    assert "Windows 亚克力模糊" not in labels
+    assert dialog.theme_visual_effect_combo.currentData() == VisualEffectMode.GAUSSIAN_BLUR
+
+    dialog.accept()
+
+    assert dialog.result_theme_settings is not None
+    assert dialog.result_theme_settings.visual_effect_mode == VisualEffectMode.GAUSSIAN_BLUR
+
+    dialog.deleteLater()
+    app.processEvents()
+
+
 def test_settings_dialog_character_selection_loads_character_theme() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")
@@ -6163,9 +6631,15 @@ class _DummyEditableInput:
     def __init__(self, text: str) -> None:
         self._text = text
         self.cleared = False
+        self.enabled = True
+        self.placeholder = ""
+        self.properties: dict[str, object] = {}
 
     def text(self) -> str:
         return self._text
+
+    def hasFocus(self) -> bool:
+        return False
 
     def clear(self) -> None:
         self.cleared = True
@@ -6173,6 +6647,15 @@ class _DummyEditableInput:
 
     def setEnabled(self, enabled: bool) -> None:
         self.enabled = enabled
+
+    def setPlaceholderText(self, text: str) -> None:
+        self.placeholder = text
+
+    def property(self, name: str) -> object:
+        return self.properties.get(name)
+
+    def setProperty(self, name: str, value: object) -> None:
+        self.properties[name] = value
 
 
 class _DummyTimer:
@@ -6184,6 +6667,7 @@ class _DummyButton:
     def __init__(self) -> None:
         self.enabled = True
         self.text = ""
+        self.properties: dict[str, object] = {}
 
     def setVisible(self, _visible: bool) -> None:
         pass
@@ -6194,10 +6678,17 @@ class _DummyButton:
     def setText(self, text: str) -> None:
         self.text = text
 
+    def property(self, name: str) -> object:
+        return self.properties.get(name)
+
+    def setProperty(self, name: str, value: object) -> None:
+        self.properties[name] = value
+
 
 class _DummySubtitleController:
     def __init__(self) -> None:
         self.cancelled_with: list[str | None] = []
+        self.waiting_started = 0
         self.active = False
         self.segments = []
         self.shown_immediately: list[str] = []
@@ -6207,6 +6698,9 @@ class _DummySubtitleController:
 
     def cancel_reply_flow(self, placeholder_text: str | None = None) -> None:
         self.cancelled_with.append(placeholder_text)
+
+    def start_waiting_indicator(self) -> None:
+        self.waiting_started += 1
 
     def show_segments(self, segments):  # type: ignore[no-untyped-def]
         self.segments.append(segments)
@@ -6227,6 +6721,26 @@ class _DummySubtitleController:
         self.display_speeds.append((typing_interval_ms, segment_pause_ms))
 
 
+class _DummyBubbleAutoHide:
+    def __init__(self) -> None:
+        self.speaking_count = 0
+
+    def notify_speaking(self) -> None:
+        self.speaking_count += 1
+
+
+class _DummyInputBarAnimator:
+    def __init__(self) -> None:
+        self.sync_count = 0
+        self.feedback_count = 0
+
+    def sync(self) -> None:
+        self.sync_count += 1
+
+    def play_send_feedback(self) -> None:
+        self.feedback_count += 1
+
+
 def test_manual_screenshot_empty_input_sends_default_text() -> None:
     window, requests, history = _build_minimal_manual_screenshot_window("")
 
@@ -6237,6 +6751,13 @@ def test_manual_screenshot_empty_input_sends_default_text() -> None:
     assert isinstance(content, list)
     assert content[0]["text"].startswith("请根据我框选的截图继续对话。")
     assert content[1]["image_url"]["url"] == "data:image/jpeg;base64,manual"
+    assert window.subtitle_controller.waiting_started == 1
+    assert window.subtitle_controller.cancelled_with == []
+    assert window.bubble_auto_hide.speaking_count == 1
+    assert window.input_edit.placeholder == "Sakura正在思考中…"
+    assert window.input_edit.properties["replyWaiting"] is True
+    assert window.send_button.properties["replyWaiting"] is True
+    assert window.input_bar_animator.sync_count == 1
     assert window.pending_manual_screen_observation is None
     assert history
     assert "data:image/jpeg;base64" not in history[0][1]
@@ -6304,20 +6825,60 @@ def test_set_busy_disables_manual_screenshot_button() -> None:
 
     class MinimalBusyWindow:
         _set_busy = PetWindow._set_busy
+        _set_reply_waiting_ui = PetWindow._set_reply_waiting_ui
+        _normal_input_placeholder_text = PetWindow._normal_input_placeholder_text
+        _reply_waiting_placeholder_text = PetWindow._reply_waiting_placeholder_text
+        _sync_input_bar_waiting_visibility = PetWindow._sync_input_bar_waiting_visibility
+        _set_widget_dynamic_property = PetWindow._set_widget_dynamic_property
 
     window = MinimalBusyWindow()
+    window.character_profile = type("CharacterProfile", (), {"display_name": "Sakura"})()
+    window.startup_initializing = False
     window.input_edit = _DummyEditableInput("")
     window.screenshot_button = _DummyButton()
     window.send_button = _DummyButton()
     window.confirm_action_button = _DummyButton()
     window.cancel_action_button = _DummyButton()
+    window.input_bar_animator = _DummyInputBarAnimator()
     window._log_interaction_stage = lambda *_args, **_kwargs: None
 
     window._set_busy(True)
+    assert window.input_edit.enabled
     assert not window.screenshot_button.enabled
+    assert not window.send_button.enabled
+    assert window.send_button.text == "等待"
+    assert window.input_edit.placeholder == "Sakura正在思考中…"
+    assert window.input_edit.properties["replyWaiting"] is True
+    assert window.send_button.properties["replyWaiting"] is True
+    assert window.input_bar_animator.sync_count == 1
 
     window._set_busy(False)
     assert window.screenshot_button.enabled
+    assert window.send_button.enabled
+    assert window.send_button.text == "发送"
+    assert window.input_edit.placeholder == "和Sakura说点什么..."
+    assert window.input_edit.properties["replyWaiting"] is False
+    assert window.send_button.properties["replyWaiting"] is False
+    assert window.input_bar_animator.sync_count == 2
+
+
+def test_input_bar_pinned_while_waiting_reply() -> None:
+    from app.ui.pet_window import PetWindow
+
+    class MinimalInputBarWindow:
+        _input_bar_pinned = PetWindow._input_bar_pinned
+        _any_dialog_open = lambda _self: False
+
+    window = MinimalInputBarWindow()
+    window.input_edit = _DummyEditableInput("")
+    window.pending_tool_action = None
+    window.reply_waiting_ui_active = False
+
+    assert not window._input_bar_pinned()
+
+    window.reply_waiting_ui_active = True
+
+    assert window._input_bar_pinned()
 
 
 def test_progress_reply_displays_and_records_assistant_message() -> None:
@@ -7032,6 +7593,12 @@ def _build_minimal_manual_screenshot_window(text: str):
 
     class MinimalManualScreenshotWindow:
         send_message = PetWindow.send_message
+        _show_waiting_reply_placeholder = PetWindow._show_waiting_reply_placeholder
+        _set_reply_waiting_ui = PetWindow._set_reply_waiting_ui
+        _normal_input_placeholder_text = PetWindow._normal_input_placeholder_text
+        _reply_waiting_placeholder_text = PetWindow._reply_waiting_placeholder_text
+        _sync_input_bar_waiting_visibility = PetWindow._sync_input_bar_waiting_visibility
+        _set_widget_dynamic_property = PetWindow._set_widget_dynamic_property
         _record_user_message = PetWindow._record_user_message
 
     window = MinimalManualScreenshotWindow()
@@ -7049,7 +7616,12 @@ def _build_minimal_manual_screenshot_window(text: str):
     window.screen_observation_enabled = True
     window.messages = []
     window.active_interaction_id = ""
+    window.startup_initializing = False
+    window.character_profile = type("CharacterProfile", (), {"display_name": "Sakura"})()
+    window.send_button = _DummyButton()
+    window.input_bar_animator = _DummyInputBarAnimator()
     window.subtitle_controller = _DummySubtitleController()
+    window.bubble_auto_hide = _DummyBubbleAutoHide()
     window._mark_user_activity = lambda: None
     window._begin_interaction = lambda _source: setattr(window, "active_interaction_id", "test")
     window._log_interaction_stage = lambda *_args, **_kwargs: None
@@ -7064,6 +7636,7 @@ def _build_minimal_manual_screenshot_window(text: str):
         "pending_manual_screen_observation",
         None,
     )
+    window._collapse_auto_fit_bubble_height = lambda: None
     return window, requests, history
 
 
@@ -7455,22 +8028,22 @@ def _minimal_settings_window(pet_window_cls, settings_service, api_client, memor
         def _create_tts_provider_from_settings(self, _settings):  # type: ignore[no-untyped-def]
             return object()
 
-        def _apply_portrait_scale_percent(self, percent: int) -> None:
-            self.portrait_scale_percent = percent
-
-        def _apply_control_panel_layout(  # type: ignore[no-untyped-def]
+        def _apply_layout_settings(  # type: ignore[no-untyped-def]
             self,
+            *,
+            portrait_scale_percent,
             control_panel_width,
             bubble_height,
             vertical_offset,
             input_bar_offset,
-            *,
-            persist: bool = True,
+            persist: bool,
         ) -> None:
+            self.portrait_scale_percent = portrait_scale_percent
             self.control_panel_width = control_panel_width
             self.bubble_height = bubble_height
             self.control_panel_vertical_offset = vertical_offset
             self.input_bar_offset = input_bar_offset
+            self.layout_persisted = persist
 
         def _sync_proactive_care_timer(self) -> None:
             pass
@@ -7687,6 +8260,110 @@ def test_subtitle_controller_show_text_immediately_does_not_use_tts() -> None:
     )
 
 
+def test_subtitle_waiting_indicator_animates_and_stops_on_text() -> None:
+    from app.ui.subtitle_controller import SubtitleController
+    from app.voice import VoicePlaybackController
+
+    class DummyLabel:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def clear(self) -> None:
+            self.text = ""
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+    class DummyTTS:
+        def discard_prepared(self, _handle):  # type: ignore[no-untyped-def]
+            pass
+
+    _qt_app_or_skip()
+    label = DummyLabel()
+    controller = SubtitleController(
+        label,  # type: ignore[arg-type]
+        VoicePlaybackController(DummyTTS(), lambda *_args, **_kwargs: None),
+        "zh",
+        lambda *_args, **_kwargs: None,
+        lambda _segment: None,
+        lambda: None,
+        lambda: True,
+    )
+
+    controller.start_waiting_indicator()
+    assert label.text == "."
+    assert controller.is_reply_sequence_active()
+
+    frames = []
+    for _ in range(8):
+        controller._show_next_waiting_indicator_frame()
+        frames.append(label.text)
+
+    assert frames == ["..", "...", "....", ".....", "......", ".....", "......", "....."]
+
+    controller.show_text_immediately("回复到了")
+
+    assert not controller.waiting_indicator_active
+    assert not controller.waiting_indicator_timer.isActive()
+    assert label.text == "回复到了"
+
+
+def test_subtitle_waiting_indicator_continues_until_tts_starts() -> None:
+    from app.ui.subtitle_controller import SubtitleController
+    from app.voice import VoicePlaybackController
+
+    class DummyLabel:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def clear(self) -> None:
+            self.text = ""
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+    class DelayedTTS:
+        def __init__(self) -> None:
+            self.on_started = None
+            self.on_finished = None
+
+        def speak(self, _text, _tone, on_finished=None, on_started=None):  # type: ignore[no-untyped-def]
+            self.on_started = on_started
+            self.on_finished = on_finished
+
+        def discard_prepared(self, _handle):  # type: ignore[no-untyped-def]
+            pass
+
+    _qt_app_or_skip()
+    label = DummyLabel()
+    tts = DelayedTTS()
+    controller = SubtitleController(
+        label,  # type: ignore[arg-type]
+        VoicePlaybackController(tts, lambda *_args, **_kwargs: None),
+        "zh",
+        lambda *_args, **_kwargs: None,
+        lambda _segment: None,
+        lambda: None,
+        lambda: True,
+    )
+
+    controller.start_waiting_indicator()
+    controller._show_next_waiting_indicator_frame()
+    controller.show_segments([ChatSegment("第一段回复", "中性", "第一段回复")])
+
+    assert controller.waiting_indicator_active
+    assert label.text == ".."
+    assert controller.current_segment is not None
+    assert tts.on_started is not None
+
+    tts.on_started()
+
+    assert not controller.waiting_indicator_active
+    assert not controller.waiting_indicator_timer.isActive()
+    assert controller.speech_text == "第一段回复"
+    controller.cancel_reply_flow()
+
+
 def test_send_message_injects_runtime_event_context_before_user_message() -> None:
     from app.agent.runtime_events import PET_REOPENED, RuntimeEvent, RuntimeEventQueue
 
@@ -7741,6 +8418,14 @@ def test_pet_input_stylesheet_has_solid_visual_effect_state() -> None:
     assert '#petInput[visualEffectMode="solid"]:focus' in stylesheet
 
 
+def test_pet_input_stylesheet_has_waiting_send_button_state() -> None:
+    stylesheet = build_pet_window_stylesheet(DEFAULT_THEME_SETTINGS)
+
+    assert '#petInput[replyWaiting="true"]' not in stylesheet
+    assert "waitingBreath" not in stylesheet
+    assert '#sendButton[replyWaiting="true"]:disabled' in stylesheet
+
+
 def test_pet_window_applies_visual_effect_dynamic_property() -> None:
     _qt_app_or_skip()
     from PySide6.QtWidgets import QFrame, QLineEdit
@@ -7760,54 +8445,173 @@ def test_pet_window_applies_visual_effect_dynamic_property() -> None:
     window.input_bar.deleteLater()
 
 
-def test_pet_window_removes_old_backdrop_before_hiding_visible_input_window(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_sync_input_bar_backdrop_toggles_software_blur_layer_by_mode() -> None:
+    """单窗口重构后：纯色模式不挂软件模糊背景层，高斯模式挂载并绑定截图回调。"""
+    from app.ui.pet_window import PetWindow
+    from app.ui.theme import ThemeSettings
+    from app.ui.window_backdrop import VisualEffectMode
+
+    class CardStub:
+        def __init__(self) -> None:
+            self.layer = "untouched"
+
+        def set_background_layer(self, layer) -> None:  # type: ignore[no-untyped-def]
+            self.layer = layer
+
+    class AnimatorStub:
+        def __init__(self) -> None:
+            self.before_show = "untouched"
+
+        def set_before_show(self, callback) -> None:  # type: ignore[no-untyped-def]
+            self.before_show = callback
+
+    blur_bg = object()
+
+    def _make_window(mode: str):  # type: ignore[no-untyped-def]
+        window = PetWindow.__new__(PetWindow)
+        window.theme_settings = ThemeSettings(visual_effect_mode=mode)
+        window.input_card = CardStub()
+        window.input_blur_background = blur_bg
+        window.input_bar = None
+        window.input_edit = None
+        window.input_bar_animator = AnimatorStub()
+        return window
+
+    # 纯色：不挂背景层、无截图回调。
+    solid = _make_window(VisualEffectMode.SOLID)
+    PetWindow._sync_input_bar_backdrop(solid)
+    assert solid.input_card.layer is None
+    assert solid.input_bar_animator.before_show is None
+
+    # 高斯模糊：挂软件模糊背景层 + 截图回调。
+    blur = _make_window(VisualEffectMode.GAUSSIAN_BLUR)
+    PetWindow._sync_input_bar_backdrop(blur)
+    assert blur.input_card.layer is blur_bg
+    assert blur.input_bar_animator.before_show == blur._refresh_input_blur_background
+
+
+def test_input_bar_windows_acrylic_config_degrades_to_software_blur(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """旧 windows_acrylic 配置不再回显原生亚克力，运行时降级为高斯模糊。"""
     import app.ui.pet_window as pet_window_module
     from app.ui.pet_window import PetWindow
     from app.ui.theme import ThemeSettings
     from app.ui.window_backdrop import VisualEffectMode
 
-    events: list[tuple[str, bool]] = []
+    monkeypatch.setattr(pet_window_module.sys, "platform", "win32")
 
-    class OldBackdrop:
-        def remove(self, window) -> None:  # type: ignore[no-untyped-def]
-            events.append(("remove", window.hidden))
-
-    class InputWindowStub:
+    class CardStub:
         def __init__(self) -> None:
-            self.hidden = False
-            self._backdrop = OldBackdrop()
-            self._background_layer = None
+            self.layer = "untouched"
 
-        def isVisible(self) -> bool:  # noqa: N802 - Qt API 兼容命名。
-            return True
+        def set_background_layer(self, layer) -> None:  # type: ignore[no-untyped-def]
+            self.layer = layer
 
-        def hide(self) -> None:
-            self.hidden = True
-            events.append(("hide", self.hidden))
+    class AnimatorStub:
+        def __init__(self) -> None:
+            self.before_show = "untouched"
+            self.after_show = "untouched"
+            self.before_hide = "untouched"
 
-        def show(self) -> None:
-            events.append(("show", self.hidden))
+        def set_before_show(self, callback) -> None:  # type: ignore[no-untyped-def]
+            self.before_show = callback
 
-    input_window = InputWindowStub()
+        def set_after_show(self, callback) -> None:  # type: ignore[no-untyped-def]
+            self.after_show = callback
+
+        def set_before_hide(self, callback) -> None:  # type: ignore[no-untyped-def]
+            self.before_hide = callback
+
+    blur_bg = object()
     window = PetWindow.__new__(PetWindow)
-    window.theme_settings = ThemeSettings(visual_effect_mode=VisualEffectMode.SOLID)
-    window.input_window = input_window
-    window.input_blur_background = None
-    window.input_bar_animator = None
-    monkeypatch.setattr(
-        pet_window_module.QApplication,
-        "processEvents",
-        lambda *args, **_kwargs: events.append(("process", input_window.hidden)),
-    )
+    window.theme_settings = ThemeSettings(visual_effect_mode=VisualEffectMode.WINDOWS_ACRYLIC)
+    window.input_card = CardStub()
+    window.input_blur_background = blur_bg
+    window.input_bar = None
+    window.input_edit = None
+    window.input_bar_animator = AnimatorStub()
 
     PetWindow._sync_input_bar_backdrop(window)
 
-    assert events == [
-        ("remove", False),
-        ("hide", True),
-        ("process", True),
-        ("show", True),
-    ]
+    assert PetWindow._input_bar_visual_effect_mode(window) == VisualEffectMode.GAUSSIAN_BLUR
+    assert window.input_card.layer is blur_bg
+    assert window.input_bar_animator.before_show == window._refresh_input_blur_background
+    assert window.input_bar_animator.after_show is None
+    assert window.input_bar_animator.before_hide is None
+
+
+def test_sync_input_bar_backdrop_uses_macos_native_backdrop(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """macOS 原生毛玻璃模式不走软件截图模糊，而是挂载 NSVisualEffectView backdrop。"""
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+    from app.ui.theme import ThemeSettings
+    from app.ui.window_backdrop import VisualEffectMode
+
+    monkeypatch.setattr(pet_window_module.sys, "platform", "darwin")
+
+    class CardStub:
+        def __init__(self) -> None:
+            self.layer = "untouched"
+            self.visible = True
+
+        def set_background_layer(self, layer) -> None:  # type: ignore[no-untyped-def]
+            self.layer = layer
+
+        def isVisible(self) -> bool:  # noqa: N802 - Qt API 兼容命名。
+            return self.visible
+
+    class BackdropStub:
+        def __init__(self) -> None:
+            self.applied: list[object] = []
+            self.removed: list[object] = []
+
+        def apply(self, window, _tint) -> None:  # type: ignore[no-untyped-def]
+            self.applied.append(window)
+
+        def remove(self, window) -> None:  # type: ignore[no-untyped-def]
+            self.removed.append(window)
+
+    class AnimatorStub:
+        def __init__(self) -> None:
+            self.before_show = "untouched"
+            self.after_show = "untouched"
+            self.before_hide = "untouched"
+
+        def set_before_show(self, callback) -> None:  # type: ignore[no-untyped-def]
+            self.before_show = callback
+
+        def set_after_show(self, callback) -> None:  # type: ignore[no-untyped-def]
+            self.after_show = callback
+
+        def set_before_hide(self, callback) -> None:  # type: ignore[no-untyped-def]
+            self.before_hide = callback
+
+    blur_bg = object()
+    backdrop = BackdropStub()
+    window = PetWindow.__new__(PetWindow)
+    window.theme_settings = ThemeSettings(visual_effect_mode=VisualEffectMode.MACOS_VISUAL_EFFECT)
+    window.input_card = CardStub()
+    window.input_blur_background = blur_bg
+    window.input_native_backdrop = backdrop
+    window.input_bar = None
+    window.input_edit = None
+    window.input_bar_animator = AnimatorStub()
+
+    PetWindow._sync_input_bar_backdrop(window)
+
+    assert window.input_card.layer is None
+    assert window.input_bar_animator.before_show is None
+    assert window.input_bar_animator.after_show == window._apply_input_bar_native_backdrop
+    assert window.input_bar_animator.before_hide == window._remove_input_bar_native_backdrop
+    assert backdrop.applied == [window.input_card]
+
+    window.theme_settings = ThemeSettings(visual_effect_mode=VisualEffectMode.GAUSSIAN_BLUR)
+    PetWindow._sync_input_bar_backdrop(window)
+
+    assert window.input_card.layer is blur_bg
+    assert window.input_bar_animator.before_show == window._refresh_input_blur_background
+    assert window.input_bar_animator.after_show is None
+    assert window.input_bar_animator.before_hide is None
+    assert backdrop.removed == [window.input_card]
 
 
 def test_local_rect_to_global_keeps_size_and_uses_main_window_origin() -> None:
@@ -7830,16 +8634,18 @@ def test_local_rect_to_global_keeps_size_and_uses_main_window_origin() -> None:
 
 def test_input_bar_animator_visibility_follows_hover_and_pin() -> None:
     _qt_app_or_skip()
-    from PySide6.QtWidgets import QWidget
+    from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
     from app.ui.input_bar_animator import InputBarAnimator
 
     bar = QWidget()
-    window = QWidget()
+    card = QWidget()
+    effect = QGraphicsOpacityEffect(card)
     pinned = {"value": False}
     hover = {"value": False}
     animator = InputBarAnimator(
         bar,
-        window,
+        card,
+        effect,
         lambda: pinned["value"],
         lambda: hover["value"],
     )
@@ -7856,23 +8662,26 @@ def test_input_bar_animator_visibility_follows_hover_and_pin() -> None:
     assert animator._target_visible() is True
 
     bar.deleteLater()
-    window.deleteLater()
+    card.deleteLater()
 
 
 def test_input_bar_animator_send_feedback_starts_animation() -> None:
     _qt_app_or_skip()
-    from PySide6.QtWidgets import QWidget
+    from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
     from app.ui.input_bar_animator import InputBarAnimator
 
     bar = QWidget()
-    window = QWidget()
-    animator = InputBarAnimator(bar, window, lambda: False, lambda: False)
+    card = QWidget()
+    effect = QGraphicsOpacityEffect(card)
+    animator = InputBarAnimator(bar, card, effect, lambda: False, lambda: False)
 
+    # 脉冲复用卡片 effect，仅在卡片可见时触发。
+    animator._shown = True
     animator.play_send_feedback()
     assert animator._send_anim is not None
 
     bar.deleteLater()
-    window.deleteLater()
+    card.deleteLater()
 
 
 class _StubVoicePlayback:

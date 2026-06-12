@@ -4,17 +4,19 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+import stat
 import sys
 import threading
 import time
 from types import SimpleNamespace
 import uuid
+import zipfile
 
 import pytest
 
 from app.agent.actions import AgentEvent, PendingToolAction
 from app.agent.builtin_tools import create_builtin_tool_registry
-from app.agent.memory import MemoryStore
+from app.agent.memory import MemoryModelImportError, MemoryStore
 from app.agent.mcp.bridge import MCPToolSpec
 from app.agent.mcp.config import load_mcp_config
 from app.agent.mcp.provider import MCPToolProvider, register_mcp_tools_from_config
@@ -611,6 +613,134 @@ def test_memory_store_ignores_incomplete_local_embedding_cache(monkeypatch) -> N
     assert config["embedder"]["config"]["model_kwargs"] == {
         "cache_folder": str(root / "runtime" / "hf-cache" / "hub"),
     }
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "",
+        "models--sentence-transformers--all-MiniLM-L6-v2",
+        "hub/models--sentence-transformers--all-MiniLM-L6-v2",
+        "hf-cache/hub/models--sentence-transformers--all-MiniLM-L6-v2",
+    ],
+)
+def test_memory_store_imports_embedding_model_archive_structures(prefix: str) -> None:
+    root = _runtime_root_path("memory_model_import")
+    archive_path = root / "models--sentence-transformers--all-MiniLM-L6-v2.zip"
+    _write_memory_model_zip(archive_path, prefix=prefix)
+    store = MemoryStore(base_dir=root, memory_client=FakeMem0())
+
+    result = store.import_embedding_model_archive(archive_path)
+
+    expected_model_dir = (
+        root
+        / "runtime"
+        / "hf-cache"
+        / "hub"
+        / "models--sentence-transformers--all-MiniLM-L6-v2"
+    )
+    assert result.model_dir == expected_model_dir
+    assert result.snapshot_count == 1
+    assert (expected_model_dir / "snapshots" / "revision" / "model.safetensors").is_file()
+    assert store.needs_embedding_model_download() is False
+
+
+def test_memory_store_import_does_not_reload_ready_runtime() -> None:
+    root = _runtime_root_path("memory_model_import_ready")
+    archive_path = root / "models--sentence-transformers--all-MiniLM-L6-v2.zip"
+    _write_memory_model_zip(archive_path, prefix="")
+    runtime = ClosableMemoryRuntime()
+    store = MemoryStore(base_dir=root, memory_client=runtime)
+
+    store.import_embedding_model_archive(archive_path)
+
+    assert store.is_ready() is True
+    assert runtime.memory_closed is False
+    assert runtime.client.closed is False
+
+
+def test_memory_store_reset_runtime_closes_qdrant_client() -> None:
+    runtime = ClosableMemoryRuntime()
+    store = MemoryStore(base_dir=_runtime_root_path("memory_reset_closes_runtime"))
+    store._memory = runtime  # type: ignore[attr-defined]
+
+    store.reset_runtime()
+
+    assert runtime.memory_closed is True
+    assert runtime.client.closed is True
+
+
+def test_memory_store_rejects_incomplete_embedding_model_archive(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    root = _runtime_root_path("memory_model_import_incomplete")
+    monkeypatch.setenv("HF_HOME", str(root / "empty_hf_home"))
+    monkeypatch.delenv("SENTENCE_TRANSFORMERS_HOME", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_CACHE", raising=False)
+    archive_path = root / "bad.zip"
+    _write_memory_model_zip(
+        archive_path,
+        prefix="models--sentence-transformers--all-MiniLM-L6-v2",
+        include_weight=False,
+    )
+    store = MemoryStore(base_dir=root, memory_client=FakeMem0())
+
+    with pytest.raises(MemoryModelImportError):
+        store.import_embedding_model_archive(archive_path)
+
+    assert store.needs_embedding_model_download() is True
+
+
+def test_memory_store_import_failure_keeps_existing_embedding_cache() -> None:
+    root = _runtime_root_path("memory_model_import_keeps_existing")
+    existing_snapshot = (
+        root
+        / "runtime"
+        / "hf-cache"
+        / "hub"
+        / "models--sentence-transformers--all-MiniLM-L6-v2"
+        / "snapshots"
+        / "existing"
+    )
+    existing_snapshot.mkdir(parents=True)
+    (existing_snapshot / "model.safetensors").write_text("existing", encoding="utf-8")
+    archive_path = root / "bad.zip"
+    _write_memory_model_zip(
+        archive_path,
+        prefix="models--sentence-transformers--all-MiniLM-L6-v2",
+        include_weight=False,
+    )
+    store = MemoryStore(base_dir=root, memory_client=FakeMem0())
+
+    with pytest.raises(MemoryModelImportError):
+        store.import_embedding_model_archive(archive_path)
+
+    assert (existing_snapshot / "model.safetensors").read_text(encoding="utf-8") == "existing"
+    assert store.needs_embedding_model_download() is False
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "../models--sentence-transformers--all-MiniLM-L6-v2/snapshots/revision/model.safetensors",
+        "models--other--model/snapshots/revision/model.safetensors",
+        "models--sentence-transformers--all-MiniLM-L6-v2/snapshots/revision/model.safetensors",
+    ],
+)
+def test_memory_store_rejects_unsafe_or_wrong_embedding_model_archive(member_name: str) -> None:
+    root = _runtime_root_path("memory_model_import_rejects")
+    archive_path = root / "bad.zip"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        if member_name.startswith("models--sentence-transformers"):
+            info = zipfile.ZipInfo(member_name)
+            info.external_attr = (stat.S_IFLNK | 0o777) << 16
+            zf.writestr(info, "target")
+        else:
+            zf.writestr(member_name, "bad")
+    store = MemoryStore(base_dir=root, memory_client=FakeMem0())
+
+    with pytest.raises(MemoryModelImportError):
+        store.import_embedding_model_archive(archive_path)
 
 
 def test_memory_store_create_update_search_and_delete() -> None:
@@ -3194,6 +3324,23 @@ def _runtime_root_path(name: str) -> Path:
     return Path(__file__).resolve().parents[2] / "__pycache__" / "test_runtime" / name / uuid.uuid4().hex
 
 
+def _write_memory_model_zip(
+    archive_path: Path,
+    *,
+    prefix: str,
+    include_weight: bool = True,
+) -> None:
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        revision = f"{prefix}/snapshots/revision" if prefix else "snapshots/revision"
+        zf.writestr(f"{revision}/config.json", "{}")
+        if not prefix:
+            zf.writestr("refs/main", "revision")
+            zf.writestr("blobs/fake", "fake")
+        if include_weight:
+            zf.writestr(f"{revision}/model.safetensors", "fake")
+
+
 class FakeMem0:
     def __init__(self) -> None:
         self.records: list[dict[str, object]] = []
@@ -3248,6 +3395,29 @@ class FakeMem0:
             for record in self.records
             if user_id is None or record.get("user_id") == user_id
         ]
+
+
+class ClosableClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class ClosableVectorStore:
+    def __init__(self, client: ClosableClient) -> None:
+        self.client = client
+
+
+class ClosableMemoryRuntime:
+    def __init__(self) -> None:
+        self.client = ClosableClient()
+        self.vector_store = ClosableVectorStore(self.client)
+        self.memory_closed = False
+
+    def close(self) -> None:
+        self.memory_closed = True
 
 
 def _write_mcp_config(root: Path, server_body: str) -> Path:

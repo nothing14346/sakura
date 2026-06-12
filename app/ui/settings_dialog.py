@@ -26,21 +26,23 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QMenu,
     QPushButton,
     QScrollArea,
     QSlider,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from app.agent.memory import MemoryStore
+from app.agent.memory import EmbeddingModelImportResult, MemoryStore
 from app.agent.mcp import MCPRuntimeSettings, WINDOWS_MCP_EXPERIMENTAL_TEXT
 from app.core.debug_log import debug_log
 from app.config.character_archive import (
@@ -236,6 +238,32 @@ class _NoWheelSlider(_NoWheelMixin, QSlider):
     pass
 
 
+class _ClickOnlyListWidget(QListWidget):
+    """左侧分类导航列表：仅响应左键单击切换页面。
+
+    禁用按住左键拖动时随鼠标连续切换当前项（默认 QListWidget 行为会误切页），
+    同时屏蔽右键（不选中、不弹上下文菜单），避免误触。
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+
+    def mousePressEvent(self, event):  # type: ignore[no-untyped-def]
+        # 仅左键触发选中/切换，右键与中键直接忽略
+        if event.button() != Qt.MouseButton.LeftButton:
+            event.ignore()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # type: ignore[no-untyped-def]
+        # 按住左键拖动时不连续切换；无按键的悬停仍走默认逻辑以保留 hover 高亮
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            event.ignore()
+            return
+        super().mouseMoveEvent(event)
+
+
 class ModelComboBox(_NoWheelComboBox):
     """可编辑模型选择框，保留 QLineEdit 风格的 text/setText 兼容接口。"""
 
@@ -326,6 +354,28 @@ class MemoryListWorker(QObject):
             self.failed.emit(str(exc))
         else:
             self.succeeded.emit(memories)
+        finally:
+            self.finished.emit()
+
+
+class MemoryModelImportWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, memory_store: MemoryStore, archive_path: Path) -> None:
+        super().__init__()
+        self.memory_store = memory_store
+        self.archive_path = archive_path
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = self.memory_store.import_embedding_model_archive(self.archive_path)
+        except Exception as exc:  # UI 边界统一转成可读错误。
+            self.failed.emit(str(exc))
+        else:
+            self.succeeded.emit(result)
         finally:
             self.finished.emit()
 
@@ -523,6 +573,8 @@ class SettingsDialog(QDialog):
         self._save_button_text: str | None = None
         self._memory_list_thread: QThread | None = None
         self._memory_list_worker: MemoryListWorker | None = None
+        self._memory_model_import_thread: QThread | None = None
+        self._memory_model_import_worker: MemoryModelImportWorker | None = None
         self._theme_ai_thread: QThread | None = None
         self._theme_ai_worker: ThemeAiWorker | None = None
         self._theme_ai_enabled = self.theme_settings.ai_enabled
@@ -537,62 +589,55 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(680, 500)
         self.resize(820, 640)
 
-        tabs = QTabWidget(self)
-        tabs.addTab(
-            self._build_grouped_settings_tab(
-                [
-                    ("角色", self._build_character_tab(character_registry, current_character)),
-                    ("主题", self._build_theme_tab()),
-                ]
+        # 左侧分类导航：一个分类对应一个内容面板，纵向列表便于后续扩展更多设置分类。
+        nav_items: list[tuple[str, QWidget]] = [
+            (
+                "角色",
+                self._build_scrollable_tab(
+                    self._build_character_tab(character_registry, current_character)
+                ),
             ),
-            "角色与外观",
-        )
-        tabs.addTab(
-            self._build_grouped_settings_tab(
-                [
-                    ("API", self._build_api_tab(api_settings)),
-                    ("TTS", self._build_tts_tab(tts_settings)),
-                ]
+            ("外观", self._build_scrollable_tab(self._build_theme_tab())),
+            ("模型", self._build_scrollable_tab(self._build_api_tab(api_settings))),
+            ("语音", self._build_scrollable_tab(self._build_tts_tab(tts_settings))),
+            (
+                "隐私",
+                self._build_scrollable_tab(
+                    self._build_privacy_tab(proactive_care_settings or ProactiveCareSettings())
+                ),
             ),
-            "模型与语音",
-        )
-        tabs.addTab(
-            self._build_grouped_settings_tab(
-                [
-                    (
-                        "隐私",
-                        self._build_privacy_tab(
-                            proactive_care_settings or ProactiveCareSettings(),
-                        ),
-                    ),
-                    (
-                        "工具",
-                        self._build_mcp_tab(
-                            mcp_settings or MCPRuntimeSettings(),
-                            tools_tab_contributions or [],
-                        ),
-                    ),
-                ]
+            (
+                "工具",
+                self._build_scrollable_tab(
+                    self._build_mcp_tab(
+                        mcp_settings or MCPRuntimeSettings(),
+                        tools_tab_contributions or [],
+                    )
+                ),
             ),
-            "权限与工具",
-        )
-        tabs.addTab(
-            self._build_scrollable_tab(
-                self._build_plugin_tab(settings_panel_contributions or [])
+            (
+                "插件",
+                self._build_scrollable_tab(
+                    self._build_plugin_tab(settings_panel_contributions or [])
+                ),
             ),
-            "插件",
-        )
-        tabs.addTab(
-            self._build_system_tab(
-                debug_log_settings or DebugLogSettings(),
-                self.startup_settings,
-                self.bubble_settings,
-                self.backchannel_settings,
+            (
+                "系统",
+                self._build_scrollable_tab(
+                    self._build_system_tab(
+                        debug_log_settings or DebugLogSettings(),
+                        self.startup_settings,
+                        self.bubble_settings,
+                        self.backchannel_settings,
+                    )
+                ),
             ),
-            "系统",
-        )
+        ]
         if memory_store is not None:
-            tabs.addTab(self._build_memory_tab(memory_store), "记忆")
+            # 记忆页自带列表滚动，沿用原行为不再额外包滚动区，避免双重滚动条。
+            nav_items.append(("记忆", self._build_memory_tab(memory_store)))
+
+        navigation = self._build_navigation(nav_items)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
@@ -603,7 +648,7 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout()
-        layout.addWidget(tabs, 1)
+        layout.addWidget(navigation, 1)
         layout.addWidget(buttons)
         self.setLayout(layout)
         self._capture_initial_tts_settings_from_controls()
@@ -619,27 +664,40 @@ class SettingsDialog(QDialog):
         if settings is not None:
             self._initial_tts_settings = settings
 
-    def _build_grouped_settings_tab(self, sections: list[tuple[str, QWidget]]) -> QWidget:
-        content = QWidget(self)
-        content.setObjectName("settingsScrollContent")
-        layout = QVBoxLayout()
-        layout.setContentsMargins(16, 18, 16, 16)
-        layout.setSpacing(12)
-        for title, section in sections:
-            section.setObjectName("settingsSectionContent")
-            group = QGroupBox(title, content)
-            group_layout = QVBoxLayout()
-            group_layout.setContentsMargins(0, 0, 0, 0)
-            group_layout.setSpacing(0)
-            group_layout.addWidget(section)
-            group.setLayout(group_layout)
-            layout.addWidget(group)
-        layout.addStretch(1)
-        content.setLayout(layout)
-        return self._build_scrollable_tab(content)
+    def _build_navigation(self, items: list[tuple[str, QWidget]]) -> QWidget:
+        """左侧分类列表 + 右侧内容堆叠，替代原顶部横向 tab，便于纵向扩展分类。"""
+        container = QWidget(self)
+        nav_list = _ClickOnlyListWidget(container)
+        nav_list.setObjectName("settingsNavList")
+        nav_list.setFixedWidth(140)
+        nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        stack = QStackedWidget(container)
+        stack.setObjectName("settingsNavStack")
+        for title, panel in items:
+            nav_list.addItem(QListWidgetItem(title))
+            stack.addWidget(panel)
+        nav_list.currentRowChanged.connect(stack.setCurrentIndex)
+        nav_list.setCurrentRow(0)
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        layout.addWidget(nav_list)
+        layout.addWidget(stack, 1)
+        container.setLayout(layout)
+        return container
 
     def _build_scrollable_tab(self, content: QWidget) -> QWidget:
         tab = QWidget(self)
+        # 内容页自身承载面板背景：QStackedWidget 不绘制 QSS 背景，内容又透明，
+        # 不给页容器上色时空白处会一路透到粉色的 QDialog 底色。
+        tab.setObjectName("settingsNavPage")
+        # 滚动内容容器必须显式透明，否则会被样式表填上默认灰背景，
+        # 盖住 settingsNavPage 的面板色，导致右侧内容区“没融入主题”。
+        # settingsScrollContent 已在主题样式表中声明为透明；保留 content 已有的
+        # objectName（如插件页的 settingsPluginTab，同样是透明规则）。
+        if not content.objectName():
+            content.setObjectName("settingsScrollContent")
         scroll_area = QScrollArea(tab)
         scroll_area.setObjectName("settingsScrollArea")
         scroll_area.viewport().setObjectName("settingsScrollViewport")
@@ -763,7 +821,6 @@ class SettingsDialog(QDialog):
             label = {
                 VisualEffectMode.SOLID: "纯色块",
                 VisualEffectMode.GAUSSIAN_BLUR: "高斯模糊",
-                VisualEffectMode.WINDOWS_ACRYLIC: "Windows 亚克力模糊",
                 VisualEffectMode.MACOS_VISUAL_EFFECT: "macOS 原生毛玻璃",
             }.get(mode_id, mode_id)
             self.theme_visual_effect_combo.addItem(label, mode_id)
@@ -963,15 +1020,106 @@ class SettingsDialog(QDialog):
         api_actions_layout.addWidget(self.api_test_button)
 
         form_layout = QFormLayout()
-        form_layout.setContentsMargins(16, 18, 16, 16)
+        form_layout.setContentsMargins(0, 0, 0, 0)
         form_layout.setSpacing(12)
         form_layout.addRow("Base URL", self.base_url_edit)
         form_layout.addRow("API Key", self.api_key_edit)
         form_layout.addRow("模型", self.model_edit)
         form_layout.addRow("超时", self.api_timeout_spin)
         form_layout.addRow("", api_actions)
-        tab.setLayout(form_layout)
+
+        form_container = QWidget(tab)
+        form_container.setLayout(form_layout)
+
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(16, 18, 16, 16)
+        outer_layout.setSpacing(12)
+        outer_layout.addWidget(form_container)
+        outer_layout.addWidget(self._build_advanced_llm_params_group(settings, tab))
+        outer_layout.addStretch(1)
+        tab.setLayout(outer_layout)
         return tab
+
+    def _build_advanced_llm_params_group(self, settings: ApiSettings, parent: QWidget) -> QGroupBox:
+        """模型页内的可折叠"高级参数"区。
+
+        以 checkable QGroupBox 作折叠开关：勾选展开、取消折叠。温度始终随配置生效
+        （默认 0.8，与历史行为一致）；top_p、max_tokens 各自带启用复选框，未启用时
+        构造为 None，请求不发送该参数，从而保持老用户行为不变。
+        """
+        group = QGroupBox("高级参数", parent)
+        group.setObjectName("advancedParamsGroup")
+        group.setCheckable(True)
+
+        # 警告说明：始终可见（折叠态也保留），既填充折叠后的空白，又提醒新手勿误改
+        self.advanced_params_hint = QLabel(
+            "⚠ 如果你不清楚这些参数的作用，请保持默认、不要随意修改。", group
+        )
+        self.advanced_params_hint.setObjectName("advancedParamsHint")
+        self.advanced_params_hint.setWordWrap(True)
+
+        # 温度：始终生效，缺省回退到内置默认 0.8
+        self.llm_temperature_spin = _NoWheelDoubleSpinBox(group)
+        self.llm_temperature_spin.setRange(0.0, 2.0)
+        self.llm_temperature_spin.setSingleStep(0.1)
+        self.llm_temperature_spin.setDecimals(2)
+        self.llm_temperature_spin.setValue(
+            settings.temperature if settings.temperature is not None else 0.8
+        )
+
+        # top_p：启用复选框 + 数值框，未启用则不发送
+        self.llm_top_p_enabled_check = QCheckBox("覆盖 top_p", group)
+        self.llm_top_p_spin = _NoWheelDoubleSpinBox(group)
+        self.llm_top_p_spin.setRange(0.0, 1.0)
+        self.llm_top_p_spin.setSingleStep(0.05)
+        self.llm_top_p_spin.setDecimals(2)
+        self.llm_top_p_spin.setValue(settings.top_p if settings.top_p is not None else 1.0)
+        self.llm_top_p_enabled_check.setChecked(settings.top_p is not None)
+        self.llm_top_p_spin.setEnabled(settings.top_p is not None)
+        self.llm_top_p_enabled_check.toggled.connect(self.llm_top_p_spin.setEnabled)
+
+        # max_tokens：启用复选框 + 数值框，未启用则不发送（不截断输出）
+        self.llm_max_tokens_enabled_check = QCheckBox("限制最大输出", group)
+        self.llm_max_tokens_spin = _NoWheelSpinBox(group)
+        self.llm_max_tokens_spin.setRange(1, 32768)
+        self.llm_max_tokens_spin.setSuffix(" tokens")
+        self.llm_max_tokens_spin.setValue(
+            settings.max_tokens if settings.max_tokens is not None else 2048
+        )
+        self.llm_max_tokens_enabled_check.setChecked(settings.max_tokens is not None)
+        self.llm_max_tokens_spin.setEnabled(settings.max_tokens is not None)
+        self.llm_max_tokens_enabled_check.toggled.connect(self.llm_max_tokens_spin.setEnabled)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(12)
+        form.addRow("温度", self.llm_temperature_spin)
+        form.addRow(self.llm_top_p_enabled_check, self.llm_top_p_spin)
+        form.addRow(self.llm_max_tokens_enabled_check, self.llm_max_tokens_spin)
+
+        body = QWidget(group)
+        body.setLayout(form)
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(16, 10, 16, 12)
+        group_layout.setSpacing(10)
+        group_layout.addWidget(self.advanced_params_hint)
+        group_layout.addWidget(body)
+        group.setLayout(group_layout)
+
+        # checkable group 充当折叠开关：未勾选时仅隐藏参数区，警告说明保持可见
+        group.toggled.connect(body.setVisible)
+        group.toggled.connect(lambda _checked: self.advanced_params_hint.setEnabled(True))
+        has_custom = (
+            settings.temperature is not None
+            or settings.top_p is not None
+            or settings.max_tokens is not None
+        )
+        # 已配置过高级参数则默认展开，便于查看；否则默认折叠
+        group.setChecked(has_custom)
+        body.setVisible(has_custom)
+        # 折叠（未勾选）时 Qt 会禁用 group 内子控件，这里恢复警告说明的可读性
+        self.advanced_params_hint.setEnabled(True)
+        return group
 
     def _build_tts_tab(self, settings: GPTSoVITSTTSSettings) -> QWidget:
         tab = QWidget(self)
@@ -1346,25 +1494,58 @@ class SettingsDialog(QDialog):
                 )
             )
 
-        form_layout = QFormLayout()
-        form_layout.setContentsMargins(16, 18, 16, 16)
-        form_layout.setSpacing(12)
-        form_layout.addRow("", self.launch_at_login_check)
-        form_layout.addRow("", self.debug_log_enabled_check)
-        form_layout.addRow("", self.debug_body_enabled_check)
-        form_layout.addRow("", self.debug_file_enabled_check)
-        form_layout.addRow("字幕逐字间隔", self.subtitle_typing_interval_spin)
-        form_layout.addRow("回复分段停顿", self.reply_segment_pause_spin)
-        form_layout.addRow("", self.bubble_auto_hide_check)
-        form_layout.addRow("气泡无操作时长", self.bubble_auto_hide_delay_spin)
-        form_layout.addRow("", self.backchannel_enabled_check)
-        form_layout.addRow("", self.backchannel_tts_enabled_check)
-        form_layout.addRow("接话延迟", self.backchannel_delay_spin)
-        form_layout.addRow("接话触发概率", self.backchannel_probability_spin)
-        self._system_form_layout = form_layout
+        startup_form = QFormLayout()
+        startup_form.setContentsMargins(16, 12, 16, 12)
+        startup_form.setSpacing(12)
+        startup_form.addRow("", self.launch_at_login_check)
+
+        debug_form = QFormLayout()
+        debug_form.setContentsMargins(16, 12, 16, 12)
+        debug_form.setSpacing(12)
+        debug_form.addRow("", self.debug_log_enabled_check)
+        debug_form.addRow("", self.debug_body_enabled_check)
+        debug_form.addRow("", self.debug_file_enabled_check)
+
+        subtitle_form = QFormLayout()
+        subtitle_form.setContentsMargins(16, 12, 16, 12)
+        subtitle_form.setSpacing(12)
+        subtitle_form.addRow("字幕逐字间隔", self.subtitle_typing_interval_spin)
+        subtitle_form.addRow("回复分段停顿", self.reply_segment_pause_spin)
+
+        bubble_form = QFormLayout()
+        bubble_form.setContentsMargins(16, 12, 16, 12)
+        bubble_form.setSpacing(12)
+        bubble_form.addRow("", self.bubble_auto_hide_check)
+        bubble_form.addRow("气泡无操作时长", self.bubble_auto_hide_delay_spin)
+        self._bubble_form_layout = bubble_form
+
+        backchannel_form = QFormLayout()
+        backchannel_form.setContentsMargins(16, 12, 16, 12)
+        backchannel_form.setSpacing(12)
+        backchannel_form.addRow("", self.backchannel_enabled_check)
+        backchannel_form.addRow("", self.backchannel_tts_enabled_check)
+        backchannel_form.addRow("接话延迟", self.backchannel_delay_spin)
+        backchannel_form.addRow("接话触发概率", self.backchannel_probability_spin)
+        self._backchannel_form_layout = backchannel_form
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(16, 18, 16, 16)
+        layout.setSpacing(12)
+        for title, group_form in (
+            ("启动", startup_form),
+            ("调试日志", debug_form),
+            ("字幕与回复", subtitle_form),
+            ("气泡", bubble_form),
+            ("接话", backchannel_form),
+        ):
+            group = QGroupBox(title, tab)
+            group.setLayout(group_form)
+            layout.addWidget(group)
+        layout.addStretch(1)
+
         self._sync_bubble_auto_hide_controls(self.bubble_auto_hide_check.isChecked())
         self._sync_backchannel_controls(self.backchannel_enabled_check.isChecked())
-        tab.setLayout(form_layout)
+        tab.setLayout(layout)
         return tab
 
     @Slot(bool)
@@ -1384,7 +1565,7 @@ class SettingsDialog(QDialog):
     def _sync_bubble_auto_hide_controls(self, enabled: bool) -> None:
         """气泡自动隐藏关闭时，不允许调整无操作时长。"""
         self._set_form_widgets_enabled(
-            getattr(self, "_system_form_layout", None),
+            getattr(self, "_bubble_form_layout", None),
             (self.bubble_auto_hide_delay_spin,),
             enabled,
         )
@@ -1393,7 +1574,7 @@ class SettingsDialog(QDialog):
     def _sync_backchannel_controls(self, enabled: bool) -> None:
         """接话层关闭时，不允许调整从属参数;接话语音还需全局 TTS 总开关。"""
         self._set_form_widgets_enabled(
-            getattr(self, "_system_form_layout", None),
+            getattr(self, "_backchannel_form_layout", None),
             (
                 self.backchannel_delay_spin,
                 self.backchannel_probability_spin,
@@ -1404,7 +1585,7 @@ class SettingsDialog(QDialog):
         tts_check = getattr(self, "tts_enabled_check", None)
         tts_on = tts_check.isChecked() if tts_check is not None else True
         self._set_form_widgets_enabled(
-            getattr(self, "_system_form_layout", None),
+            getattr(self, "_backchannel_form_layout", None),
             (self.backchannel_tts_enabled_check,),
             enabled and tts_on,
         )
@@ -1466,6 +1647,9 @@ class SettingsDialog(QDialog):
 
     def _build_memory_tab(self, memory_store: MemoryStore) -> QWidget:
         tab = QWidget(self)
+        # 记忆页不经 _build_scrollable_tab，需直接承载面板背景，
+        # 与其它导航页保持一致的卡片底色与圆角边框。
+        tab.setObjectName("settingsNavPage")
         _ = memory_store
 
         self.memory_search_edit = QLineEdit(tab)
@@ -1474,6 +1658,11 @@ class SettingsDialog(QDialog):
 
         self.memory_refresh_button = QPushButton("刷新", tab)
         self.memory_refresh_button.clicked.connect(self._load_memory_entries)
+        self.memory_import_model_button = QPushButton("导入记忆模型", tab)
+        self.memory_import_model_button.setToolTip(
+            "导入 models--sentence-transformers--all-MiniLM-L6-v2.zip，供无法自动下载时使用。"
+        )
+        self.memory_import_model_button.clicked.connect(self._import_memory_model_archive)
         self.memory_status_label = QLabel(MEMORY_READING_TEXT, tab)
 
         self.memory_table = QTableWidget(0, 4, tab)
@@ -1524,6 +1713,7 @@ class SettingsDialog(QDialog):
 
         filter_layout = QHBoxLayout()
         filter_layout.addWidget(self.memory_search_edit, 1)
+        filter_layout.addWidget(self.memory_import_model_button)
         filter_layout.addWidget(self.memory_refresh_button)
 
         status_layout = QHBoxLayout()
@@ -1589,6 +1779,74 @@ class SettingsDialog(QDialog):
         self._memory_list_worker = worker
         thread.start()
 
+    def _import_memory_model_archive(self) -> None:
+        if self.memory_store is None:
+            return
+        if self._memory_model_import_thread is not None:
+            QMessageBox.information(self, "导入中", "记忆模型正在导入，请等待完成。")
+            return
+        path_text, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入记忆模型 ZIP",
+            str(self.base_dir),
+            "记忆模型 ZIP (*.zip)",
+        )
+        if not path_text:
+            return
+        self._start_memory_model_import(Path(path_text))
+
+    def _start_memory_model_import(self, archive_path: Path) -> None:
+        if self.memory_store is None:
+            return
+        self._set_memory_model_import_busy(True)
+        self.memory_status_label.setText("正在导入记忆模型...")
+
+        thread = QThread()
+        worker = MemoryModelImportWorker(self.memory_store, archive_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._handle_memory_model_import_success)
+        worker.failed.connect(self._handle_memory_model_import_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._reset_memory_model_import_worker)
+
+        self._memory_model_import_thread = thread
+        self._memory_model_import_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def _handle_memory_model_import_success(self, result: EmbeddingModelImportResult) -> None:
+        self.memory_status_label.setText("记忆模型已导入，正在重新读取长期记忆...")
+        QMessageBox.information(
+            self,
+            "导入成功",
+            (
+                f"记忆模型已导入：{result.model_name}\n"
+                f"缓存目录：{result.cache_folder}\n"
+                f"快照数量：{result.snapshot_count}"
+            ),
+        )
+        self._load_memory_entries()
+
+    @Slot(str)
+    def _handle_memory_model_import_failed(self, message: str) -> None:
+        self.memory_status_label.setText(f"导入失败：{message}")
+        QMessageBox.warning(self, "导入失败", message)
+
+    @Slot()
+    def _reset_memory_model_import_worker(self) -> None:
+        self._memory_model_import_thread = None
+        self._memory_model_import_worker = None
+        self._set_memory_model_import_busy(False)
+
+    def _set_memory_model_import_busy(self, busy: bool) -> None:
+        if hasattr(self, "memory_import_model_button"):
+            self.memory_import_model_button.setEnabled(not busy)
+        if hasattr(self, "memory_refresh_button"):
+            self.memory_refresh_button.setEnabled(not busy and self._memory_list_thread is None)
+
     def _memory_loading_text(self) -> str:
         if self.memory_store is None:
             return MEMORY_READING_TEXT
@@ -1623,7 +1881,7 @@ class SettingsDialog(QDialog):
 
     @Slot()
     def _reset_memory_list_worker(self) -> None:
-        self.memory_refresh_button.setEnabled(True)
+        self.memory_refresh_button.setEnabled(self._memory_model_import_thread is None)
         self._memory_list_thread = None
         self._memory_list_worker = None
         if self._memory_reload_pending:
@@ -2040,6 +2298,7 @@ class SettingsDialog(QDialog):
             "memory_selection_label": f"color: {theme.secondary_text_color};",
             "memory_preview_label": f"color: {theme.text_color};",
             "system_restart_hint_label": f"color: {theme.muted_text_color};",
+            "advanced_params_hint": f"color: {theme.secondary_text_color};",
         }
         for attr, style in inline_styles.items():
             widget = getattr(self, attr, None)
@@ -2966,6 +3225,12 @@ class SettingsDialog(QDialog):
         base_url = self.base_url_edit.text().strip().rstrip("/")
         api_key = self.api_key_edit.text().strip()
         model = self.model_edit.text().strip()
+        temperature = self.llm_temperature_spin.value()
+        if (
+            self._initial_api_settings.temperature is None
+            and abs(temperature - 0.8) < 0.005
+        ):
+            temperature = None
 
         if not _is_http_url(base_url):
             QMessageBox.warning(self, "配置无效", "Base URL 必须是有效的 http 或 https 地址。")
@@ -2982,6 +3247,17 @@ class SettingsDialog(QDialog):
             api_key=api_key,
             model=model,
             timeout_seconds=self.api_timeout_spin.value(),
+            temperature=temperature,
+            top_p=(
+                self.llm_top_p_spin.value()
+                if self.llm_top_p_enabled_check.isChecked()
+                else None
+            ),
+            max_tokens=(
+                self.llm_max_tokens_spin.value()
+                if self.llm_max_tokens_enabled_check.isChecked()
+                else None
+            ),
         )
 
     def _validated_api_model_probe_settings(self) -> ApiSettings | None:

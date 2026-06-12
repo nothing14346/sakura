@@ -47,6 +47,10 @@ class ApiSettings:
     api_key: str
     model: str
     timeout_seconds: int = 60
+    # 角色对话生成参数；None 表示沿用内置默认/不发送该参数，保持历史行为。
+    temperature: float | None = None  # None → 角色对话用内置默认 0.8
+    top_p: float | None = None  # None → 不发送 top_p
+    max_tokens: int | None = None  # None → 不发送 max_tokens（不截断输出）
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,21 @@ class OpenAICompatibleClient:
         """运行时更新 API 配置，供设置界面保存后立即生效。"""
         self.settings = settings
         self._unsupported_chat_params.clear()
+
+    def resolve_dialogue_params(self) -> tuple[float, dict[str, Any]]:
+        """返回角色对话用的生成参数：温度 + 额外参数（top_p/max_tokens）。
+
+        仅供角色对话入口（chat() 与 Agent 主工具循环）调用；记忆抽取、视觉摘要、
+        JSON 修复等内部功能调用必须保留各自硬编码的低温度，不得使用本方法，
+        否则会被用户配置污染。未配置的字段回退到内置默认（温度 0.8）或直接不发送。
+        """
+        temperature = self.settings.temperature if self.settings.temperature is not None else 0.8
+        extra: dict[str, Any] = {}
+        if self.settings.top_p is not None:
+            extra["top_p"] = self.settings.top_p
+        if self.settings.max_tokens is not None:
+            extra["max_tokens"] = self.settings.max_tokens
+        return temperature, extra
 
     def test_connection(self) -> str:
         """发送一次最小聊天请求，验证 Base URL、API Key 和模型是否可用。"""
@@ -140,11 +159,13 @@ class OpenAICompatibleClient:
         reply_portraits: list[str] | None = None,
     ) -> ChatReply:
         segmented_reply_instruction = _build_segmented_reply_instruction(reply_tones, reply_portraits)
+        temperature, extra_params = self.resolve_dialogue_params()
         content = self.complete_raw(
             f"{system_prompt.strip()}\n\n{segmented_reply_instruction}",
             messages,
-            temperature=0.8,
+            temperature=temperature,
             response_format=STRUCTURED_JSON_RESPONSE_FORMAT,
+            **extra_params,
         )
 
         reply = parse_chat_reply(content)

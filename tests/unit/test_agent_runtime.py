@@ -67,6 +67,8 @@ def _dummy_api_client() -> MagicMock:
     client.chat.return_value = ChatReply(
         segments=[ChatSegment(ja="おはよう", zh="早安", tone="开心", portrait="站立待机")]
     )
+    # 角色对话入口会读取生成参数；返回内置默认温度与空额外参数，保持原有调用行为。
+    client.resolve_dialogue_params.return_value = (0.8, {})
     return client
 
 

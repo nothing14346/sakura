@@ -36,8 +36,6 @@ class VisualEffectMode:
     @classmethod
     def available_modes(cls) -> list[str]:
         modes = [cls.SOLID, cls.GAUSSIAN_BLUR]
-        if sys.platform == "win32" and _windows_build() >= 17134:
-            modes.append(cls.WINDOWS_ACRYLIC)
         if sys.platform == "darwin":
             modes.append(cls.MACOS_VISUAL_EFFECT)
         return modes
@@ -115,16 +113,12 @@ class MacOSVisualEffectBackdrop:
         if sys.platform != "darwin":
             return
         if self._effect_view is not None:
+            self._sync_effect_view_frame(window)
             return
         try:
-            from ctypes import c_void_p
-
-            import objc
             from AppKit import NSVisualEffectView
-            from Foundation import NSMakeRect
 
-            win_id = int(window.winId())
-            root_view = objc.objc_object(c_void_p=c_void_p(win_id))
+            root_view = self._root_view_for_window(window)
 
             # root_view (QNSView) 自身就是 contentView。
             # 若把 NSVisualEffectView 添加为 contentView 的子视图，它在 Qt 直接绘制
@@ -136,12 +130,9 @@ class MacOSVisualEffectBackdrop:
                 return
 
             # 对齐 root_view 在其父视图中的位置和尺寸（root_view 可能不在 (0,0)）
-            rv_frame = root_view.frame()
-            frame = NSMakeRect(
-                rv_frame.origin.x, rv_frame.origin.y,
-                rv_frame.size.width, rv_frame.size.height,
+            effect_view = NSVisualEffectView.alloc().initWithFrame_(
+                self._frame_for_root_view(root_view)
             )
-            effect_view = NSVisualEffectView.alloc().initWithFrame_(frame)
             if effect_view is None:
                 self._fallback.apply(window, tint)
                 return
@@ -165,6 +156,33 @@ class MacOSVisualEffectBackdrop:
         except Exception as exc:
             debug_log("UI", "macOS NSVisualEffectView 创建失败，降级为半透明", {"error": str(exc)})
             self._fallback.apply(window, tint)
+
+    def _sync_effect_view_frame(self, window: QWidget) -> None:
+        if self._effect_view is None:
+            return
+        try:
+            root_view = self._root_view_for_window(window)
+            self._effect_view.setFrame_(self._frame_for_root_view(root_view))
+        except Exception as exc:  # noqa: BLE001
+            debug_log("UI", "macOS NSVisualEffectView 尺寸同步失败", {"error": str(exc)})
+
+    def _root_view_for_window(self, window: QWidget) -> object:
+        from ctypes import c_void_p
+
+        import objc
+
+        return objc.objc_object(c_void_p=c_void_p(int(window.winId())))
+
+    def _frame_for_root_view(self, root_view: object) -> object:
+        from Foundation import NSMakeRect
+
+        rv_frame = root_view.frame()
+        return NSMakeRect(
+            rv_frame.origin.x,
+            rv_frame.origin.y,
+            rv_frame.size.width,
+            rv_frame.size.height,
+        )
 
     def remove(self, window: QWidget) -> None:
         if self._effect_view is not None:
