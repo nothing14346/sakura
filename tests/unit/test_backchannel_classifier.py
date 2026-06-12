@@ -111,7 +111,7 @@ def test_pure_emotion_implies_intent(
 
 @pytest.mark.parametrize("text", ["", "   ", "今天天气不错"])
 def test_no_signal_returns_none(classifier: RuleClassifier, text: str) -> None:
-    # 无可靠信号 → None,由 resolver 落兜底池(闲聊有意走 fallback,FEAT.md §9)。
+    # 无可靠信号 → None,由 resolver 落兜底池(闲聊有意走 fallback)。
     assert classifier.classify(text) is None
 
 

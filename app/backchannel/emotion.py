@@ -7,7 +7,7 @@ from pathlib import Path
 from app.backchannel.models import EMOTIONS
 from app.core.debug_log import debug_log
 
-# 情感打分制(FEAT.md §10 PR1):从"首个信号命中即采用"升级为累计打分。
+# 情感打分制:从"首个信号命中即采用"升级为累计打分。
 # 词典走子串匹配 + 最长匹配压制(「不开心」命中时压住其子串「开心」),
 # argmax 过阈值才输出;低于阈值由调用方(分类器)回退意图缺省映射。
 DEFAULT_EMOTION_THRESHOLD = 1.0

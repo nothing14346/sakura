@@ -12,7 +12,7 @@ from app.backchannel.models import (
 )
 
 # 防重复记忆窗口:最近 N 个变体不再被选中。
-# 依据:filler 的缓和效果随重复使用衰减(Shiwa et al. 2009 习惯化效应,FEAT.md §3)。
+# 依据:filler 的缓和效果随重复使用衰减,所以短期内轮换变体。
 DEFAULT_RECENT_LIMIT = 3
 MIN_DIRECT_CONFIDENCE = 0.55
 
@@ -28,7 +28,7 @@ class BackchannelChoice:
 class TemplateResolver:
     """模板匹配 + 防重复轮换。
 
-    匹配优先级(FEAT.md §9):
+    匹配优先级:
       1. phase 命中(相位条目优先,如 repeated_issue 覆盖普通 error 条目)
       2. (intent, emotion) 精确命中
       3. 同 intent 命中(emotion 不同——窄词表下让模板尽量可用)

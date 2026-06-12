@@ -171,20 +171,3 @@ def test_load_representative_manifest(tmp_path: Path) -> None:
         "long_wait",
     }
     assert manifest.fallback_templates, "兜底池不能为空"
-
-
-def test_load_shipped_sakura_asset_manifest() -> None:
-    """随 feat 分发的 Sakura 示例资源应可被只下载该目录的用户直接安装。"""
-    asset_path = (
-        Path(__file__).resolve().parents[2]
-        / "feats"
-        / "backchannel-layer"
-        / "assets"
-        / "Sakura"
-        / "manifest.json"
-    )
-    manifest = load_backchannel_manifest(asset_path)
-    template_ids = {template.id for template in manifest.templates}
-    assert "sakura_fallback_neutral" in template_ids
-    assert "sakura_greeting_return" in template_ids
-    assert manifest.fallback_templates

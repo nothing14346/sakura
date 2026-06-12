@@ -1092,7 +1092,7 @@ class PetWindow(QWidget):
         """显示接话:只走轻量字幕+立绘路径。
 
         临时段绝不进入回复历史(_remember_reply_history_segments)、聊天记录
-        (_record_history)、LLM messages 上下文或分段播放队列(FEAT.md §3)。
+        (_record_history)、LLM messages 上下文或分段播放队列。
         """
         segment = ChatSegment(
             ja=choice.variant.ja,

@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-# 词表定稿见 feats/backchannel-layer/FEAT.md §9。
 # 硬约束:分类器输出标签集与模板键标签集必须是同一张表,
 # 否则会产生永远不可达的死条目(标签漂移在草案审查中已实际出现过)。
 INTENTS = (

@@ -79,7 +79,7 @@ BACKCHANNEL_DEFAULT_MODE = "rules"
 
 @dataclass(frozen=True)
 class BackchannelSettings:
-    """本地快速接话层配置(feats/backchannel-layer/FEAT.md §8)。
+    """本地快速接话层配置。
 
     默认关闭;v1 仅实现 rules 模式(hybrid 留枚举位)。
     timeout_ms 留待 hybrid 分类器引入时再加(规则分类同步且 <10ms,无超时语义)。

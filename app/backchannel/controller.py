@@ -20,7 +20,7 @@ class BackchannelController(QObject):
 
     不直接依赖任何 UI 类:显示动作由 display 回调注入,宿主(PetWindow)
     决定怎么呈现。回调只应走轻量字幕/立绘路径——临时段绝不进入
-    回复历史、聊天记录、LLM 上下文或分段播放队列(FEAT.md §3 硬约束)。
+    回复历史、聊天记录、LLM 上下文或分段播放队列。
 
     分类是纯规则(<10ms),直接跑在主线程 QTimer 回调里,无需线程。
     """
@@ -69,7 +69,7 @@ class BackchannelController(QObject):
             return
         if not (text or "").strip():
             return
-        # 触发概率:防罐头感的调节阀(filler 效果随重复衰减,FEAT.md §3)。
+        # 触发概率:防罐头感的调节阀。
         if self._settings.probability < 1.0 and self._rng.random() >= self._settings.probability:
             return
         self._pending_text = text

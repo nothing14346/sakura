@@ -6,7 +6,7 @@ from app.backchannel.emotion import EmotionScorer
 from app.backchannel.models import DEFAULT_EMOTION, BackchannelLabel
 
 # 规则分类器:零依赖、零模型,目标 <10ms。
-# 设计原则(FEAT.md §4):情绪线索在表层特征(标点/语气词/emoji),
+# 设计原则:情绪线索在表层特征(标点/语气词/emoji),
 # 规则比 embedding 更擅长;意图的 embedding 原型分类留给 hybrid 模式(v2)。
 # 词表只能输出 models.INTENTS / models.EMOTIONS 中的标签(词表对齐硬约束)。
 
@@ -115,7 +115,7 @@ class RuleClassifier:
 
         "不开心""心态崩了"这类纯情绪表达没有任务意图,落 fallback 的
         中性确认("嗯。")等于没接上;情绪→意图的映射让它们落到
-        安抚/共情模板(对话行为研究中情绪与行为互相增益,FEAT.md §10)。
+        安抚/共情模板。
         """
         emotion = self._emotion_scorer.best(content)
         if emotion is None:
