@@ -2,6 +2,9 @@
 
 .env
 
+# macOS
+.DS_Store
+
 __pycache__/
 *.py[cod]
 *$py.class
@@ -31,9 +34,11 @@ data/memory.json
 data/memory_curation_state.json
 data/reminders.json
 data/visual_observations/
+data/runtime_events/
 data/notes/
 data/tts_bundles/
 data/logs/
+data/cache/
 tts/
 data/config/api.yaml
 data/config/characters.yaml

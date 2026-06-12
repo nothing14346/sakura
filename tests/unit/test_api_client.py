@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from typing import Any
 
 from app.llm.api_client import (
@@ -319,6 +320,126 @@ def test_complete_with_tools_can_request_structured_json(monkeypatch) -> None:  
     assert captured["response_format"] == {"type": "json_object"}
 
 
+def test_complete_with_tools_parses_pseudo_tool_call_json_content(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = OpenAICompatibleClient(
+        ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="key",
+            model="model",
+        )
+    )
+
+    def fake_post(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            '{"tool":"playwright_navigate",'
+                            '"parameters":{"url":"https://example.com"}}'
+                        ),
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(client, "_post_chat_completions", fake_post)
+
+    turn = client.complete_with_tools(
+        "system",
+        [{"role": "user", "content": "open"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "playwright_navigate",
+                    "description": "Open",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    )
+
+    assert turn.tool_calls[0].id == "pseudo_tool_call_0"
+    assert turn.tool_calls[0].name == "playwright_navigate"
+    assert turn.tool_calls[0].arguments == {"url": "https://example.com"}
+    assert turn.message["tool_calls"][0]["function"]["name"] == "playwright_navigate"
+
+
+def test_complete_with_tools_ignores_plain_json_reply_without_tool_call(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = OpenAICompatibleClient(
+        ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="key",
+            model="model",
+        )
+    )
+
+    monkeypatch.setattr(
+        client,
+        "_post_chat_completions",
+        lambda _payload: {
+            "choices": [{"message": {"role": "assistant", "content": '{"segments":[]}'}}]
+        },
+    )
+
+    turn = client.complete_with_tools(
+        "system",
+        [{"role": "user", "content": "hello"}],
+        structured_response=True,
+    )
+
+    assert turn.tool_calls == []
+    assert "tool_calls" not in turn.message
+
+
+def test_complete_with_tools_parses_nested_pseudo_tool_call(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = OpenAICompatibleClient(
+        ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="key",
+            model="model",
+        )
+    )
+
+    monkeypatch.setattr(
+        client,
+        "_post_chat_completions",
+        lambda _payload: {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            '{"tool_call":{"name":"playwright_navigate",'
+                            '"arguments":{"url":"https://example.com"}}}'
+                        ),
+                    }
+                }
+            ]
+        },
+    )
+
+    turn = client.complete_with_tools(
+        "system",
+        [{"role": "user", "content": "open"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "playwright_navigate",
+                    "description": "Open",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    )
+
+    assert turn.tool_calls[0].name == "playwright_navigate"
+    assert turn.tool_calls[0].arguments == {"url": "https://example.com"}
+
+
 def test_segmented_reply_instruction_requests_portrait_field() -> None:
     instruction = _build_segmented_reply_instruction(
         ["中性", "请求"],
@@ -368,6 +489,72 @@ def test_list_models_requests_models_endpoint(monkeypatch) -> None:  # type: ign
         "auth": "Bearer key",
         "timeout": 12,
     }
+
+
+def test_list_models_normalizes_google_ai_studio_base_url(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    captured: dict[str, Any] = {}
+    client = OpenAICompatibleClient(
+        ApiSettings(
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            api_key="key",
+            model="",
+        )
+    )
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def read(self) -> bytes:
+            return b'{"data":[{"id":"gemini-2.5-flash"}]}'
+
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        _ = timeout
+        captured["url"] = request.full_url
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    assert client.list_models() == ["gemini-2.5-flash"]
+    assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/openai/models"
+
+
+def test_chat_completions_normalizes_google_ai_studio_base_url(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    captured: dict[str, Any] = {}
+    client = OpenAICompatibleClient(
+        ApiSettings(
+            base_url="https://generativelanguage.googleapis.com/v1",
+            api_key="key",
+            model="gemini-2.5-flash",
+        )
+    )
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def read(self) -> bytes:
+            return b'{"choices":[{"message":{"content":"OK"}}]}'
+
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        _ = timeout
+        captured["url"] = request.full_url
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    assert client.test_connection() == "OK"
+    assert captured["url"] == "https://generativelanguage.googleapis.com/v1/openai/chat/completions"
 
 
 def test_list_models_allows_empty_model_but_requires_key() -> None:
@@ -424,6 +611,41 @@ def test_list_models_wraps_http_error(monkeypatch) -> None:  # type: ignore[no-u
         assert "API HTTP 401" in str(exc)
     else:
         raise AssertionError("HTTP 错误应包装为 ApiRequestError")
+
+
+def test_google_ai_studio_auth_error_gets_actionable_message(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = OpenAICompatibleClient(
+        ApiSettings("https://generativelanguage.googleapis.com/v1beta", "key", "", timeout_seconds=1)
+    )
+    error_body = (
+        '{"error":{"code":401,"message":"Request had invalid authentication credentials.",'
+        '"status":"UNAUTHENTICATED","details":[{"reason":"API_KEY_SERVICE_BLOCKED",'
+        '"method":"google.ai.generativelanguage.v1.ModelService.ListModels"}]}}'
+    )
+
+    def fake_urlopen(_request, timeout):  # type: ignore[no-untyped-def]
+        _ = timeout
+        import urllib.error
+
+        raise urllib.error.HTTPError(
+            "https://generativelanguage.googleapis.com/v1beta/openai/models",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(error_body.encode("utf-8")),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    try:
+        client.list_models()
+    except ApiRequestError as exc:
+        message = str(exc)
+        assert "Google AI Studio 认证失败" in message
+        assert "AI Studio API Key" in message
+        assert "/v1beta/openai" in message
+    else:
+        raise AssertionError("Google AI Studio 认证错误应包装为中文提示")
 
 
 def test_list_models_wraps_url_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]

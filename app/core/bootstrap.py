@@ -18,6 +18,7 @@ from app.config.character_loader import (
     load_character_system_prompt,
 )
 from app.storage.chat_history import ChatHistoryStore
+from app.agent.runtime_events import RuntimeEventLog
 from app.core.debug_log import debug_log
 from app.voice.tts import (
     TTS_PROVIDER_GENIE,
@@ -26,6 +27,7 @@ from app.voice.tts import (
     NullTTSProvider,
     TTSConfigError,
     TTSProvider,
+    purge_tts_cache,
 )
 from app.storage.visual_observation import VisualObservationStore
 from app.core.plugin_manager import SakuraPluginManager
@@ -145,8 +147,10 @@ def build_initial_app_context(base_dir: Path, startup_state: StartupState | None
         memory=memory_store,
     )
     history_store = _create_history_store(base_dir, character_profile)
+    runtime_event_log = _create_runtime_event_log(base_dir, character_profile)
     visual_observation_store = _create_visual_observation_store(base_dir, character_profile)
     debug_log_settings = settings_service.load_debug_log_settings()
+    startup_settings = settings_service.load_startup_settings()
     memory_curation_settings = settings_service.load_memory_curation_settings()
     memory_curation_state = MemoryCurationState(
         base_dir / "data" / "memory_curation_state.json"
@@ -184,6 +188,7 @@ def build_initial_app_context(base_dir: Path, startup_state: StartupState | None
             reminder_store=reminder_store,
             history_store=history_store,
             visual_observation_store=visual_observation_store,
+            runtime_event_log=runtime_event_log,
         ),
         features=FeatureServices(
             settings_service=settings_service,
@@ -192,6 +197,7 @@ def build_initial_app_context(base_dir: Path, startup_state: StartupState | None
             plugin_manager=plugin_manager,
             mcp_settings=mcp_settings,
             debug_log_settings=debug_log_settings,
+            startup_settings=startup_settings,
             memory_curation_settings=memory_curation_settings,
             memory_curation_state=memory_curation_state,
             memory_curator=memory_curator,
@@ -208,6 +214,12 @@ def build_deferred_services(base_dir: Path, context: AppContext) -> DeferredStar
     settings_service = context.settings_service
     character_profile = context.character_profile
 
+    # 启动时清空 data/cache/tts 残留（崩溃/强退遗留的临时 wav），失败不影响启动
+    try:
+        purge_tts_cache(base_dir)
+    except OSError as exc:
+        debug_log("Startup", "TTS 缓存启动清理失败，已忽略", {"error": str(exc)})
+
     try:
         tts_settings = settings_service.load_tts_settings(
             character_profile=character_profile,
@@ -215,9 +227,9 @@ def build_deferred_services(base_dir: Path, context: AppContext) -> DeferredStar
         if not tts_settings.enabled:
             tts_provider = NullTTSProvider()
         elif tts_settings.provider == TTS_PROVIDER_GENIE:
-            tts_provider = GenieTTSProvider(tts_settings)
+            tts_provider = GenieTTSProvider(tts_settings, base_dir=base_dir)
         else:
-            tts_provider = GPTSoVITSTTSProvider(tts_settings)
+            tts_provider = GPTSoVITSTTSProvider(tts_settings, base_dir=base_dir)
     except TTSConfigError as exc:
         print(f"[TTS] 配置无效，已禁用 TTS：{exc}")
         debug_log("TTS", "配置无效，已禁用 TTS", {"error": str(exc)})
@@ -304,6 +316,7 @@ def build_app_context(base_dir: Path, startup_state: StartupState | None = None)
             plugin_manager=deferred.plugin_manager,
             mcp_settings=deferred.mcp_settings,
             debug_log_settings=context.debug_log_settings,
+            startup_settings=context.startup_settings,
             memory_curation_settings=context.memory_curation_settings,
             memory_curation_state=context.memory_curation_state,
             memory_curator=context.memory_curator,
@@ -325,6 +338,12 @@ def _create_history_store(base_dir: Path, profile: CharacterProfile) -> ChatHist
     history_path = base_dir / "data" / "chat_history" / f"{profile.id}.jsonl"
     _migrate_legacy_history(base_dir, profile, history_path)
     return ChatHistoryStore(history_path, profile.display_name)
+
+
+def _create_runtime_event_log(base_dir: Path, profile: CharacterProfile) -> RuntimeEventLog:
+    """按角色创建运行时事件日志（与聊天历史路径风格一致，但完全独立）。"""
+    event_path = base_dir / "data" / "runtime_events" / f"{profile.id}.jsonl"
+    return RuntimeEventLog(event_path)
 
 
 def _create_visual_observation_store(

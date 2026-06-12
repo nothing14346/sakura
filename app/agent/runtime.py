@@ -100,6 +100,13 @@ class AgentRuntime:
         """允许模型在对话或主动事件中自主决定是否观察屏幕。"""
         self.autonomous_screen_observation_enabled = enabled
 
+    def _resolve_dialogue_params(self) -> tuple[float, dict[str, Any]]:
+        """读取角色对话生成参数，兼容测试桩和外部传入的旧客户端实现。"""
+        resolver = getattr(self.api_client, "resolve_dialogue_params", None)
+        if callable(resolver):
+            return resolver()
+        return 0.8, {}
+
     def _parse_final_reply_with_retry(
         self,
         system_prompt: str,
@@ -108,13 +115,16 @@ class AgentRuntime:
     ) -> ChatReply:
         """最终回复结构不合格时，只重试一次格式修复，避免坏 JSON 进入 UI。"""
         parsed = parse_chat_reply_result(raw_content)
-        if not parsed.needs_retry:
+        retry_reason = parsed.reason if parsed.needs_retry else ""
+        if not parsed.needs_retry and _reply_has_display_translation(parsed.reply):
             return parsed.reply
+        if not retry_reason:
+            retry_reason = "missing_translation"
 
         debug_log(
             "AgentRuntime",
             "最终回复结构异常，准备请求模型修复",
-            {"reason": parsed.reason, "raw_content": raw_content},
+            {"reason": retry_reason, "raw_content": raw_content},
         )
         repair_messages: list[ChatMessage] = [
             *working_messages,
@@ -244,13 +254,18 @@ class AgentRuntime:
                         visible_browser_mode=visible_browser_guard_active,
                     )
                 )
+                dialogue_temperature, dialogue_extra_params = self._resolve_dialogue_params()
                 turn = self.api_client.complete_with_tools(
                     system_prompt,
                     working_messages,
                     tools=tool_defs,
                     tool_choice="auto",
-                    temperature=0.8,
-                    structured_response=True,
+                    temperature=dialogue_temperature,
+                    # Some OpenAI-compatible providers return pseudo tool-call JSON
+                    # in message.content instead of native tool_calls when
+                    # response_format=json_object is combined with tools.
+                    structured_response=not bool(tool_defs),
+                    **dialogue_extra_params,
                 )
             except ApiRequestError as exc:
                 if messages_contain_image(working_messages) and is_vision_unsupported_error(exc):
@@ -937,6 +952,15 @@ def _should_emit_progress(metadata: dict[str, Any]) -> bool:
     if not isinstance(tool_names, list):
         return False
     return any(str(name).startswith("windows__") for name in tool_names)
+
+
+def _reply_has_display_translation(reply: ChatReply) -> bool:
+    """最终回复需要中文显示文本，避免兼容模型的纯日语正文漏到中文字幕 UI。"""
+
+    return any(
+        segment.text.strip() and segment.translation.strip()
+        for segment in reply.segments
+    )
 
 
 def _native_tool_call_to_policy_call(

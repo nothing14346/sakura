@@ -67,6 +67,8 @@ def _dummy_api_client() -> MagicMock:
     client.chat.return_value = ChatReply(
         segments=[ChatSegment(ja="おはよう", zh="早安", tone="开心", portrait="站立待机")]
     )
+    # 角色对话入口会读取生成参数；返回内置默认温度与空额外参数，保持原有调用行为。
+    client.resolve_dialogue_params.return_value = (0.8, {})
     return client
 
 
@@ -300,6 +302,37 @@ class TestAgentRuntimeBasics:
 
         assert client.complete_with_tools.call_count == 2
         assert result.reply.segments[0].text == "直したよ。"
+
+    def test_final_reply_retries_when_plain_japanese_lacks_translation(self) -> None:
+        client = _dummy_api_client()
+        client.complete_with_tools.side_effect = [
+            MagicMock(
+                content="……開いたよ。\n\n北京の天気は、今日は曇りみたい。",
+                tool_calls=[],
+            ),
+            MagicMock(
+                content=json.dumps(
+                    {
+                        "segments": [
+                            {
+                                "ja": "北京の天気を確認したよ。",
+                                "zh": "我确认了北京天气。",
+                                "tone": "中性",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                tool_calls=[],
+            ),
+        ]
+        runtime = AgentRuntime(client, _dummy_system_prompt())
+
+        result = runtime.handle_user_message([ChatMessage(role="user", content="北京天气")])
+
+        assert client.complete_with_tools.call_count == 2
+        assert result.reply.segments[0].text == "北京の天気を確認したよ。"
+        assert result.reply.segments[0].translation == "我确认了北京天气。"
 
     def test_final_reply_uses_safe_fallback_when_retry_still_invalid(self) -> None:
         client = _dummy_api_client()

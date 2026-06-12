@@ -4,17 +4,19 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+import stat
 import sys
 import threading
 import time
 from types import SimpleNamespace
 import uuid
+import zipfile
 
 import pytest
 
 from app.agent.actions import AgentEvent, PendingToolAction
 from app.agent.builtin_tools import create_builtin_tool_registry
-from app.agent.memory import MemoryStore
+from app.agent.memory import MemoryModelImportError, MemoryStore
 from app.agent.mcp.bridge import MCPToolSpec
 from app.agent.mcp.config import load_mcp_config
 from app.agent.mcp.provider import MCPToolProvider, register_mcp_tools_from_config
@@ -383,6 +385,22 @@ def test_memory_store_returns_failed_response_for_nonblocking_memory_tools() -> 
     assert "client has been closed" in result["error"]
 
 
+def test_memory_store_downgrades_closed_client_during_search() -> None:
+    class ClosedClientMemory:
+        def search(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("Cannot send a request, as the client has been closed.")
+
+    store = MemoryStore(base_dir=_runtime_root_path("memory_closed_client_search"))
+    store._memory = ClosedClientMemory()
+
+    result = store.search_memory({"query": "偏好"})
+
+    assert result["status"] == "failed"
+    assert "普通聊天仍可继续" in result["message"]
+    assert "client has been closed" in result["error"]
+    assert store._memory is None
+
+
 def test_memory_store_reload_keeps_old_runtime_until_new_runtime_is_ready() -> None:
     old_settings = ApiSettings("https://old.example.com/v1", "old-key", "old-model")
     new_settings = ApiSettings("https://new.example.com/v1", "new-key", "new-model")
@@ -595,6 +613,134 @@ def test_memory_store_ignores_incomplete_local_embedding_cache(monkeypatch) -> N
     assert config["embedder"]["config"]["model_kwargs"] == {
         "cache_folder": str(root / "runtime" / "hf-cache" / "hub"),
     }
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "",
+        "models--sentence-transformers--all-MiniLM-L6-v2",
+        "hub/models--sentence-transformers--all-MiniLM-L6-v2",
+        "hf-cache/hub/models--sentence-transformers--all-MiniLM-L6-v2",
+    ],
+)
+def test_memory_store_imports_embedding_model_archive_structures(prefix: str) -> None:
+    root = _runtime_root_path("memory_model_import")
+    archive_path = root / "models--sentence-transformers--all-MiniLM-L6-v2.zip"
+    _write_memory_model_zip(archive_path, prefix=prefix)
+    store = MemoryStore(base_dir=root, memory_client=FakeMem0())
+
+    result = store.import_embedding_model_archive(archive_path)
+
+    expected_model_dir = (
+        root
+        / "runtime"
+        / "hf-cache"
+        / "hub"
+        / "models--sentence-transformers--all-MiniLM-L6-v2"
+    )
+    assert result.model_dir == expected_model_dir
+    assert result.snapshot_count == 1
+    assert (expected_model_dir / "snapshots" / "revision" / "model.safetensors").is_file()
+    assert store.needs_embedding_model_download() is False
+
+
+def test_memory_store_import_does_not_reload_ready_runtime() -> None:
+    root = _runtime_root_path("memory_model_import_ready")
+    archive_path = root / "models--sentence-transformers--all-MiniLM-L6-v2.zip"
+    _write_memory_model_zip(archive_path, prefix="")
+    runtime = ClosableMemoryRuntime()
+    store = MemoryStore(base_dir=root, memory_client=runtime)
+
+    store.import_embedding_model_archive(archive_path)
+
+    assert store.is_ready() is True
+    assert runtime.memory_closed is False
+    assert runtime.client.closed is False
+
+
+def test_memory_store_reset_runtime_closes_qdrant_client() -> None:
+    runtime = ClosableMemoryRuntime()
+    store = MemoryStore(base_dir=_runtime_root_path("memory_reset_closes_runtime"))
+    store._memory = runtime  # type: ignore[attr-defined]
+
+    store.reset_runtime()
+
+    assert runtime.memory_closed is True
+    assert runtime.client.closed is True
+
+
+def test_memory_store_rejects_incomplete_embedding_model_archive(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    root = _runtime_root_path("memory_model_import_incomplete")
+    monkeypatch.setenv("HF_HOME", str(root / "empty_hf_home"))
+    monkeypatch.delenv("SENTENCE_TRANSFORMERS_HOME", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_CACHE", raising=False)
+    archive_path = root / "bad.zip"
+    _write_memory_model_zip(
+        archive_path,
+        prefix="models--sentence-transformers--all-MiniLM-L6-v2",
+        include_weight=False,
+    )
+    store = MemoryStore(base_dir=root, memory_client=FakeMem0())
+
+    with pytest.raises(MemoryModelImportError):
+        store.import_embedding_model_archive(archive_path)
+
+    assert store.needs_embedding_model_download() is True
+
+
+def test_memory_store_import_failure_keeps_existing_embedding_cache() -> None:
+    root = _runtime_root_path("memory_model_import_keeps_existing")
+    existing_snapshot = (
+        root
+        / "runtime"
+        / "hf-cache"
+        / "hub"
+        / "models--sentence-transformers--all-MiniLM-L6-v2"
+        / "snapshots"
+        / "existing"
+    )
+    existing_snapshot.mkdir(parents=True)
+    (existing_snapshot / "model.safetensors").write_text("existing", encoding="utf-8")
+    archive_path = root / "bad.zip"
+    _write_memory_model_zip(
+        archive_path,
+        prefix="models--sentence-transformers--all-MiniLM-L6-v2",
+        include_weight=False,
+    )
+    store = MemoryStore(base_dir=root, memory_client=FakeMem0())
+
+    with pytest.raises(MemoryModelImportError):
+        store.import_embedding_model_archive(archive_path)
+
+    assert (existing_snapshot / "model.safetensors").read_text(encoding="utf-8") == "existing"
+    assert store.needs_embedding_model_download() is False
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "../models--sentence-transformers--all-MiniLM-L6-v2/snapshots/revision/model.safetensors",
+        "models--other--model/snapshots/revision/model.safetensors",
+        "models--sentence-transformers--all-MiniLM-L6-v2/snapshots/revision/model.safetensors",
+    ],
+)
+def test_memory_store_rejects_unsafe_or_wrong_embedding_model_archive(member_name: str) -> None:
+    root = _runtime_root_path("memory_model_import_rejects")
+    archive_path = root / "bad.zip"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        if member_name.startswith("models--sentence-transformers"):
+            info = zipfile.ZipInfo(member_name)
+            info.external_attr = (stat.S_IFLNK | 0o777) << 16
+            zf.writestr(info, "target")
+        else:
+            zf.writestr(member_name, "bad")
+    store = MemoryStore(base_dir=root, memory_client=FakeMem0())
+
+    with pytest.raises(MemoryModelImportError):
+        store.import_embedding_model_archive(archive_path)
 
 
 def test_memory_store_create_update_search_and_delete() -> None:
@@ -969,6 +1115,24 @@ servers:
     provider.close()
 
 
+def test_mcp_provider_closed_tool_returns_failed_result() -> None:
+    root = _runtime_root_path("mcp_closed_tool")
+    registry = ToolRegistry()
+    provider = MCPToolProvider(
+        load_mcp_config(_write_mcp_config(root, "name_prefix: demo_")),
+        bridge_factory=_FakeMCPBridge,
+    )
+    provider.register_tools(registry)
+    tool = registry.get("demo_echo")
+    assert tool is not None
+
+    provider.close()
+    result = tool.handler({"message": "hello"})
+
+    assert result["isError"] is True
+    assert "连接已关闭" in result["error"]
+
+
 def test_mcp_provider_skips_disabled_server() -> None:
     root = _runtime_root_path("mcp_disabled_server")
     registry = ToolRegistry()
@@ -1005,18 +1169,18 @@ servers:
     )
 
     assert config.servers[0].name == "windows"
-    assert not config.servers[0].enabled
+    assert config.servers[0].enabled
 
 
-def test_settings_service_saves_and_loads_windows_mcp_as_disabled() -> None:
+def test_settings_service_saves_and_loads_experimental_windows_mcp() -> None:
     service = AppSettingsService(_runtime_root_path("mcp_runtime_save"))
 
     service.save_mcp_runtime_settings(MCPRuntimeSettings(windows_enabled=True))
 
-    assert not service.load_mcp_runtime_settings().windows_enabled
+    assert service.load_mcp_runtime_settings().windows_enabled
 
 
-def test_register_mcp_tools_skips_unavailable_windows_mcp() -> None:
+def test_register_mcp_tools_loads_experimental_windows_mcp_when_enabled() -> None:
     root = _runtime_root_path("mcp_register_windows_override")
     config_dir = root / "data" / "config"
     config_dir.mkdir(parents=True)
@@ -1041,8 +1205,9 @@ servers:
         runtime_settings=MCPRuntimeSettings(windows_enabled=True),
     )
 
-    assert provider is None
-    assert registry.get("windows__echo") is None
+    assert provider is not None
+    assert registry.get("windows__echo") is not None
+    provider.close()
 
 
 def test_mcp_provider_filters_tools_and_applies_tool_policies() -> None:
@@ -1185,24 +1350,26 @@ def test_playwright_search_web_returns_structured_results(monkeypatch: pytest.Mo
 
     class ResultEl:
         def query_selector(self, selector: str):  # type: ignore[no-untyped-def]
-            if selector == ".result__title":
+            if selector == "h2":
                 return TitleEl()
-            if selector == ".result__snippet":
+            if selector == "p":
                 return SnippetEl()
-            if selector == ".result__url":
+            if selector == ".b_attribution cite":
                 return DisplayUrlEl()
-            if selector == ".result__a":
+            if selector == "h2 a":
                 return LinkEl()
             return None
 
     class Page:
-        url = "https://html.duckduckgo.com/html/?q=%E4%BA%8C%E9%98%B6%E5%A0%82%E7%9C%9F%E7%BA%A2"
+        url = "https://www.bing.com/search?q=%E4%BA%8C%E9%98%B6%E5%A0%82%E7%9C%9F%E7%BA%A2"
+        navigated: list[str] = []
 
-        def goto(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        def goto(self, url, **_kwargs):  # type: ignore[no-untyped-def]
+            self.navigated.append(url)
             return None
 
         def query_selector_all(self, selector: str):  # type: ignore[no-untyped-def]
-            return [ResultEl()] if selector == ".result__body" else []
+            return [ResultEl()] if selector == "li.b_algo" else []
 
     from plugins.playwright_browser import browser
 
@@ -1210,10 +1377,12 @@ def test_playwright_search_web_returns_structured_results(monkeypatch: pytest.Mo
     monkeypatch.setattr(browser, "_bg_executor", None)
     monkeypatch.setattr(browser, "_browser_thread_id", None)
     monkeypatch.setattr(browser, "_use_bg_thread", True)
-    monkeypatch.setattr(browser, "_ensure_browser", lambda: Page())
+    page = Page()
+    monkeypatch.setattr(browser, "_ensure_browser", lambda: page)
 
     result = browser.search_web("二阶堂真红")
 
+    assert page.navigated == ["https://www.bing.com/search?q=%E4%BA%8C%E9%98%B6%E5%A0%82%E7%9C%9F%E7%BA%A2"]
     assert "萌娘百科 - 二阶堂真红" in result
     assert "二阶堂真红是《五彩斑斓的世界》系列角色。" in result
     assert "zh.moegirl.org.cn" in result
@@ -1239,13 +1408,13 @@ def test_playwright_search_web_registry_keeps_default_limit(monkeypatch: pytest.
 
     class ResultEl:
         def query_selector(self, selector: str):  # type: ignore[no-untyped-def]
-            if selector == ".result__title":
+            if selector == "h2":
                 return TitleEl()
-            if selector == ".result__snippet":
+            if selector == "p":
                 return SnippetEl()
-            if selector == ".result__url":
+            if selector == ".b_attribution cite":
                 return DisplayUrlEl()
-            if selector == ".result__a":
+            if selector == "h2 a":
                 return LinkEl()
             return None
 
@@ -1254,7 +1423,7 @@ def test_playwright_search_web_registry_keeps_default_limit(monkeypatch: pytest.
             return None
 
         def query_selector_all(self, selector: str):  # type: ignore[no-untyped-def]
-            return [ResultEl()] if selector == ".result__body" else []
+            return [ResultEl()] if selector == "li.b_algo" else []
 
     from plugins.playwright_browser import browser
 
@@ -3155,6 +3324,23 @@ def _runtime_root_path(name: str) -> Path:
     return Path(__file__).resolve().parents[2] / "__pycache__" / "test_runtime" / name / uuid.uuid4().hex
 
 
+def _write_memory_model_zip(
+    archive_path: Path,
+    *,
+    prefix: str,
+    include_weight: bool = True,
+) -> None:
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        revision = f"{prefix}/snapshots/revision" if prefix else "snapshots/revision"
+        zf.writestr(f"{revision}/config.json", "{}")
+        if not prefix:
+            zf.writestr("refs/main", "revision")
+            zf.writestr("blobs/fake", "fake")
+        if include_weight:
+            zf.writestr(f"{revision}/model.safetensors", "fake")
+
+
 class FakeMem0:
     def __init__(self) -> None:
         self.records: list[dict[str, object]] = []
@@ -3209,6 +3395,29 @@ class FakeMem0:
             for record in self.records
             if user_id is None or record.get("user_id") == user_id
         ]
+
+
+class ClosableClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class ClosableVectorStore:
+    def __init__(self, client: ClosableClient) -> None:
+        self.client = client
+
+
+class ClosableMemoryRuntime:
+    def __init__(self) -> None:
+        self.client = ClosableClient()
+        self.vector_store = ClosableVectorStore(self.client)
+        self.memory_closed = False
+
+    def close(self) -> None:
+        self.memory_closed = True
 
 
 def _write_mcp_config(root: Path, server_body: str) -> Path:
