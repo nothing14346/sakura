@@ -91,6 +91,26 @@ Sakura 最大的特点是：**她会主动来找你**。
 | [技术讲解 README](docs/TECHNICAL_README.md) | 运行时架构、启动流程、项目结构、配置项 |
 | [插件 SDK 文档](docs/SAKURA_PLUGIN_SDK.md) | 插件开发入口 |
 
+## 致谢与开源许可说明
+
+Sakura Desktop Pet 受桌面 Agent、桌宠交互与插件化生态中多个开源项目启发。特别感谢 [Shinsekai](https://github.com/RachelForster/Shinsekai) 项目及其插件生态在桌宠、角色交互、插件扩展等方向上的探索，为 Sakura 的兼容设计和功能演进提供了参考。
+
+本项目采用 MIT License 开源。你可以自由使用、复制、修改、合并、发布、分发、再授权或销售本项目代码，但需要保留本项目的版权声明和 MIT License 文本。
+
+Copyright © 2026 Rvosy
+
+### 第三方代码与兼容说明
+
+本项目中的内置插件 `plugins/playwright_browser` 包含基于以下 MIT 开源项目的代码与改动：
+
+- Project: [`shinsekai-playwright-browser`](https://github.com/RachelForster/shinsekai-playwright-browser)
+- License: MIT License
+- Copyright: Copyright © 2026 Chihiro
+
+Sakura 在此基础上进行了适配和修改，用于提供 Playwright 浏览器自动化能力。
+
+感谢所有开源项目作者和贡献者。
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=Rvosy%2Fsakura&type=date&legend=top-left">
@@ -100,9 +120,3 @@ Sakura 最大的特点是：**她会主动来找你**。
    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Rvosy/sakura&type=date&legend=top-left" />
  </picture>
 </a>
-
-
-
-## License
-
-MIT © Rvosy
