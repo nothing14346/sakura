@@ -85,6 +85,7 @@ from app.llm.context_trimming import trim_messages_for_model
 from app.core.chat_worker import ChatWorker, EventWorker
 from app.core.debug_log import debug_log, summarize_messages
 from app.config.settings_service import BackchannelSettings, BubbleSettings, StartupSettings
+from app.backchannel.audio_cache import BackchannelAudioCache, voice_fingerprint
 from app.backchannel.classifier import RuleClassifier
 from app.backchannel.controller import BackchannelController
 from app.backchannel.manifest import BackchannelManifestError, load_backchannel_manifest
@@ -1074,6 +1075,7 @@ class PetWindow(QWidget):
             return
         self._discard_backchannel_audio_cache()
         self.backchannel_manifest = None
+        self._backchannel_audio_cache = None
         path = profile.backchannel_manifest_path
         if path is None:
             controller.set_manifest(None)
@@ -1085,6 +1087,12 @@ class PetWindow(QWidget):
             controller.set_manifest(None)
             return
         self.backchannel_manifest = manifest if manifest else None
+        # 合成音频的磁盘持久化:按角色分目录,声线指纹做失效;
+        # 角色包保持只读,运行时产物一律落 data/。
+        self._backchannel_audio_cache = BackchannelAudioCache(
+            self.base_dir / "data" / "backchannels" / profile.id / "audio",
+            voice_fingerprint(profile.voice),
+        )
         controller.set_manifest(self.backchannel_manifest)
         self._prepare_backchannel_audio_cache()
 
@@ -1147,12 +1155,33 @@ class PetWindow(QWidget):
         if prepared is None:
             prepared = {}
             self._backchannel_prepared_audio = prepared
+        cache = getattr(self, "_backchannel_audio_cache", None)
+        # 空闲时机先把已合成完、尚未播放的句柄落盘:不落盘则应用重启后
+        # 这些合成全部白做。落盘成功即丢弃句柄(provider 顺带清理它的
+        # 临时文件),后续播放统一走磁盘缓存分支。
+        if cache is not None:
+            discard_prepared = getattr(self.tts_provider, "discard_prepared", None)
+            for key in list(prepared.keys()):
+                handle = prepared[key]
+                if handle.audio_path is None or handle.failed:
+                    continue
+                if cache.store(key[1], key[2], handle.audio_path) is None:
+                    continue
+                prepared.pop(key, None)
+                if callable(discard_prepared):
+                    try:
+                        discard_prepared(handle)
+                    except Exception as exc:  # noqa: BLE001
+                        debug_log("Backchannel", "落盘后丢弃合成句柄失败", {"error": str(exc)})
         provider = self.tts_provider
         queued = 0
         missing_audio = 0
         for template in manifest.templates:
             for variant in template.variants:
                 if self._backchannel_variant_audio_available(manifest, variant.audio):
+                    continue
+                # 之前合成并持久化过的不再重复合成(动态链接:内容寻址命中)。
+                if cache is not None and cache.lookup(template.tone, variant.ja) is not None:
                     continue
                 missing_audio += 1
                 key = (template.id, template.tone, variant.ja)
@@ -1245,6 +1274,23 @@ class PetWindow(QWidget):
                 self._request_backchannel_audio_playback(choice, handle)
                 return
 
+        cache = getattr(self, "_backchannel_audio_cache", None)
+        # 磁盘缓存命中:之前合成并持久化的音频直接播放。
+        # 仍需临时复制——provider 播放结束会删除播放文件,直接播缓存
+        # 文件会把缓存本体删掉(这也是预置音频复制机制必须保留的原因)。
+        if cache is not None:
+            cached_audio = cache.lookup(choice.template.tone, choice.variant.ja)
+            if cached_audio is not None:
+                playable_audio = self._copy_backchannel_audio_for_playback(cached_audio)
+                if playable_audio is not None:
+                    handle = TTSPreparedAudio(
+                        text=choice.variant.ja,
+                        tone=choice.template.tone,
+                        audio_path=playable_audio,
+                    )
+                    self._request_backchannel_audio_playback(choice, handle)
+                    return
+
         prepared = getattr(self, "_backchannel_prepared_audio", {})
         key = self._backchannel_audio_key(choice)
         handle = prepared.get(key)
@@ -1260,6 +1306,10 @@ class PetWindow(QWidget):
             )
             return
         prepared.pop(key, None)
+        # 播放前落盘:provider 播放后会删除合成文件,此刻是持久化的
+        # 最后机会;下次同句直接走上面的磁盘缓存分支。
+        if cache is not None and handle.audio_path is not None:
+            cache.store(choice.template.tone, choice.variant.ja, handle.audio_path)
         self._request_backchannel_audio_playback(choice, handle)
 
     def _request_backchannel_audio_playback(

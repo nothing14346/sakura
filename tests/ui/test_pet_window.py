@@ -1687,6 +1687,150 @@ def test_settings_dialog_returns_backchannel_settings() -> None:
     app.processEvents()
 
 
+def test_pet_window_backchannel_disk_cache_persists_and_replays(tmp_path: Path) -> None:
+    """合成音频持久化与动态链接:空闲落盘 → 跳过重复合成 → 重启等价场景直接命中磁盘缓存播放。"""
+    from app.backchannel.audio_cache import BackchannelAudioCache
+    from app.backchannel.models import (
+        BackchannelManifest,
+        BackchannelTemplate,
+        BackchannelVariant,
+    )
+    from app.backchannel.resolver import BackchannelChoice
+    from app.ui.pet_window import PetWindow
+    from app.voice.tts import TTSPreparedAudio
+
+    class ProviderStub:
+        def __init__(self) -> None:
+            self.prepared: list[str] = []
+            self.spoken_paths: list[Path | None] = []
+            self.discarded: list[str] = []
+
+        def prepare(self, text: str, tone: str | None = None) -> TTSPreparedAudio:
+            self.prepared.append(text)
+            return TTSPreparedAudio(text=text, tone=tone)
+
+        def speak_prepared(self, handle, on_started=None, on_finished=None):  # type: ignore[no-untyped-def]
+            self.spoken_paths.append(handle.audio_path)
+
+        def discard_prepared(self, handle: TTSPreparedAudio) -> None:
+            self.discarded.append(handle.text)
+
+    class WindowStub:
+        _backchannel_tts_wanted = PetWindow._backchannel_tts_wanted
+        _backchannel_tts_active = PetWindow._backchannel_tts_active
+        _backchannel_audio_key = PetWindow._backchannel_audio_key
+        _prepare_backchannel_audio_cache = PetWindow._prepare_backchannel_audio_cache
+        _backchannel_variant_audio_available = PetWindow._backchannel_variant_audio_available
+        _resolve_backchannel_audio_path = PetWindow._resolve_backchannel_audio_path
+        _copy_backchannel_audio_for_playback = PetWindow._copy_backchannel_audio_for_playback
+        _play_backchannel_audio = PetWindow._play_backchannel_audio
+        _request_backchannel_audio_playback = PetWindow._request_backchannel_audio_playback
+
+        def __init__(self) -> None:
+            self.backchannel_settings = BackchannelSettings(enabled=True, tts_enabled=True)
+            self.tts_provider = ProviderStub()
+            self._active_backchannel_audio = None
+            self.logged: list[tuple[str, dict[str, object] | None]] = []
+            template = BackchannelTemplate(
+                id="greeting",
+                tone="中性",
+                portrait="高兴满足",
+                variants=(BackchannelVariant(ja="……おかえり。", zh="……欢迎回来。"),),
+                intent="greeting_return",
+                emotion="neutral",
+            )
+            self.backchannel_manifest = BackchannelManifest(templates=(template,))
+            self.choice = BackchannelChoice(template, template.variants[0])
+            self._backchannel_audio_cache = BackchannelAudioCache(tmp_path / "audio", "fp")
+            synth = tmp_path / "synth.wav"
+            synth.write_bytes(b"wav-bytes")
+            self._backchannel_prepared_audio = {
+                ("greeting", "中性", "……おかえり。"): TTSPreparedAudio(
+                    text="……おかえり。", tone="中性", audio_path=synth
+                )
+            }
+
+        def _log_interaction_stage(self, stage: str, payload=None):  # type: ignore[no-untyped-def]
+            self.logged.append((stage, payload))
+
+    window = WindowStub()
+    cache = window._backchannel_audio_cache
+
+    # 空闲补合成入口:已合成句柄落盘、从内存丢弃、不重复提交合成
+    window._prepare_backchannel_audio_cache()
+    cached = cache.lookup("中性", "……おかえり。")
+    assert cached is not None and cached.read_bytes() == b"wav-bytes"
+    assert window._backchannel_prepared_audio == {}
+    assert window.tts_provider.discarded == ["……おかえり。"]
+    assert window.tts_provider.prepared == []  # 磁盘已有 → 不再合成
+
+    # 播放走磁盘缓存分支:播的是临时副本而非缓存本体,缓存在播后存活
+    window._play_backchannel_audio(window.choice)
+    assert len(window.tts_provider.spoken_paths) == 1
+    played = window.tts_provider.spoken_paths[0]
+    assert played is not None and played != cached
+    assert cached.exists()
+    played.unlink(missing_ok=True)
+
+
+def test_pet_window_backchannel_synth_persisted_on_play(tmp_path: Path) -> None:
+    """磁盘缓存未命中时播放内存句柄,播放前落盘——下次直接复用。"""
+    from app.backchannel.audio_cache import BackchannelAudioCache
+    from app.backchannel.models import BackchannelTemplate, BackchannelVariant
+    from app.backchannel.resolver import BackchannelChoice
+    from app.ui.pet_window import PetWindow
+    from app.voice.tts import TTSPreparedAudio
+
+    class ProviderStub:
+        def __init__(self) -> None:
+            self.spoken: list[str] = []
+
+        def speak_prepared(self, handle, on_started=None, on_finished=None):  # type: ignore[no-untyped-def]
+            self.spoken.append(handle.text)
+
+    class WindowStub:
+        _backchannel_tts_wanted = PetWindow._backchannel_tts_wanted
+        _backchannel_audio_key = PetWindow._backchannel_audio_key
+        _resolve_backchannel_audio_path = PetWindow._resolve_backchannel_audio_path
+        _copy_backchannel_audio_for_playback = PetWindow._copy_backchannel_audio_for_playback
+        _play_backchannel_audio = PetWindow._play_backchannel_audio
+        _request_backchannel_audio_playback = PetWindow._request_backchannel_audio_playback
+
+        def __init__(self) -> None:
+            self.backchannel_settings = BackchannelSettings(enabled=True, tts_enabled=True)
+            self.tts_provider = ProviderStub()
+            self._active_backchannel_audio = None
+            self.backchannel_manifest = None
+            self.logged: list[tuple[str, dict[str, object] | None]] = []
+            template = BackchannelTemplate(
+                id="greeting",
+                tone="中性",
+                portrait="高兴满足",
+                variants=(BackchannelVariant(ja="……おかえり。", zh="……欢迎回来。"),),
+                intent="greeting_return",
+                emotion="neutral",
+            )
+            self.choice = BackchannelChoice(template, template.variants[0])
+            self._backchannel_audio_cache = BackchannelAudioCache(tmp_path / "audio", "fp")
+            synth = tmp_path / "synth.wav"
+            synth.write_bytes(b"wav-bytes")
+            self._backchannel_prepared_audio = {
+                ("greeting", "中性", "……おかえり。"): TTSPreparedAudio(
+                    text="……おかえり。", tone="中性", audio_path=synth
+                )
+            }
+
+        def _log_interaction_stage(self, stage: str, payload=None):  # type: ignore[no-untyped-def]
+            self.logged.append((stage, payload))
+
+    window = WindowStub()
+    window._play_backchannel_audio(window.choice)
+    assert window.tts_provider.spoken == ["……おかえり。"]
+    # 播放前已持久化,句柄已从内存移除
+    assert window._backchannel_audio_cache.lookup("中性", "……おかえり。") is not None
+    assert window._backchannel_prepared_audio == {}
+
+
 def test_pet_window_backchannel_audio_uses_prepared_tts() -> None:
     from app.backchannel.models import (
         BackchannelManifest,
