@@ -14,7 +14,8 @@ def classifier() -> RuleClassifier:
 @pytest.mark.parametrize(
     ("text", "intent", "emotion"),
     [
-        ("这个报错怎么回事", "error", "frustrated"),
+        # 打分制后情绪反映实际线索:"怎么回事"是困惑信号,不再用意图缺省 frustrated
+        ("这个报错怎么回事", "error", "confused"),
         ("跑不起来了,还是报错", "error", "frustrated"),
         ("```\nTraceback (most recent call last):\n```", "error", "frustrated"),
         ("怎么又失败了!!", "error", "frustrated"),
@@ -89,6 +90,23 @@ def test_sentence_final_particles_do_not_create_question_signal(
     text: str,
 ) -> None:
     assert classifier.classify(text) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "intent", "emotion"),
+    [
+        ("不开心", "support", "sad"),
+        ("绝望了", "complaint", "frustrated"),
+        ("今天好开心呀", "positive", "happy"),
+    ],
+)
+def test_pure_emotion_implies_intent(
+    classifier: RuleClassifier, text: str, intent: str, emotion: str
+) -> None:
+    # 纯情绪表达无任务意图关键词,由情绪反推意图(不开心 → 安抚而非"嗯。")。
+    label = classifier.classify(text)
+    assert label is not None
+    assert (label.intent, label.emotion) == (intent, emotion)
 
 
 @pytest.mark.parametrize("text", ["", "   ", "今天天气不错"])

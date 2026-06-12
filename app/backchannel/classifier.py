@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from app.backchannel.emotion import EmotionScorer
 from app.backchannel.models import DEFAULT_EMOTION, BackchannelLabel
 
 # 规则分类器:零依赖、零模型,目标 <10ms。
@@ -49,16 +50,6 @@ _INTENT_PRIORITY = (
 )
 
 # 情绪信号,按优先级检查,首个命中即采用。
-_EMOTION_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("angry", ("气死", "烦死", "靠", "妈的", "滚", "受不了")),
-    ("sad", ("难过", "想哭", "哭了", "伤心", "委屈", "呜", "唉")),
-    ("anxious", ("急", "赶时间", "deadline", "来不及", "马上要", "快点")),
-    ("frustrated", ("还是不行", "又不行", "又失败", "怎么又", "试了好几次", "还是报错")),
-    ("confused", ("搞不懂", "不明白", "看不懂", "懵", "奇怪", "为什么")),
-    ("playful", ("嘿嘿", "233", "喵", "~", "～")),
-    ("happy", ("哈哈", "好耶", "开心", "太好了", "成功")),
-)
-
 _EXCLAMATION_RUN = re.compile(r"[!！]{2,}")
 _QUESTION_MARKS = re.compile(r"[?？]")
 _CODE_FENCE = "```"
@@ -81,9 +72,24 @@ _BASE_CONFIDENCE = 0.65
 _CONFIDENCE_STEP = 0.15
 _MAX_CONFIDENCE = 0.9
 
+# 纯情绪表达(无任务意图关键词)的情绪→意图反推:
+# 负面情绪寻求安慰/共情,正面情绪分享喜悦。confused/embarrassed
+# 单独出现时语境太模糊,不反推(留给 fallback)。
+_EMOTION_IMPLIED_INTENT: dict[str, str] = {
+    "sad": "support",
+    "anxious": "support",
+    "angry": "complaint",
+    "frustrated": "complaint",
+    "happy": "positive",
+    "playful": "positive",
+}
+
 
 class RuleClassifier:
     """零依赖规则分类器。返回 None 表示无可靠信号,调用方落兜底池。"""
+
+    def __init__(self, emotion_scorer: EmotionScorer | None = None) -> None:
+        self._emotion_scorer = emotion_scorer if emotion_scorer is not None else EmotionScorer()
 
     def classify(self, text: str) -> BackchannelLabel | None:
         content = (text or "").strip()
@@ -96,13 +102,28 @@ class RuleClassifier:
 
         intent, hits = self._classify_intent(content)
         if intent is None:
-            return None
+            return self._classify_by_emotion_only(content)
         emotion = self._classify_emotion(content, intent)
         confidence = min(
             _MAX_CONFIDENCE,
             _BASE_CONFIDENCE + _CONFIDENCE_STEP * max(0, hits - 1),
         )
         return BackchannelLabel(intent=intent, emotion=emotion, confidence=confidence)
+
+    def _classify_by_emotion_only(self, content: str) -> BackchannelLabel | None:
+        """意图无关键词但情绪信号过阈值时,由情绪反推意图。
+
+        "不开心""心态崩了"这类纯情绪表达没有任务意图,落 fallback 的
+        中性确认("嗯。")等于没接上;情绪→意图的映射让它们落到
+        安抚/共情模板(对话行为研究中情绪与行为互相增益,FEAT.md §10)。
+        """
+        emotion = self._emotion_scorer.best(content)
+        if emotion is None:
+            return None
+        intent = _EMOTION_IMPLIED_INTENT.get(emotion)
+        if intent is None:
+            return None
+        return BackchannelLabel(intent=intent, emotion=emotion, confidence=_BASE_CONFIDENCE)
 
     def _classify_greeting(self, content: str) -> BackchannelLabel | None:
         # 程式化问候必须基本占满整句;短句里混入任务/情绪信号时交给计分器,
@@ -147,9 +168,11 @@ class RuleClassifier:
         return None, 0
 
     def _classify_emotion(self, content: str, intent: str) -> str:
-        for emotion, signals in _EMOTION_SIGNALS:
-            if any(signal in content for signal in signals):
-                return emotion
+        # 情感打分制(EmotionScorer):词典累计打分,过阈值才采信;
+        # 无可靠信号时回退感叹号规则与意图缺省映射(保持 v1 行为)。
+        scored = self._emotion_scorer.best(content)
+        if scored is not None:
+            return scored
         if _EXCLAMATION_RUN.search(content):
             # 连续感叹号:正面意图按高兴算,其余按生气算。
             return "happy" if intent == "positive" else "angry"
